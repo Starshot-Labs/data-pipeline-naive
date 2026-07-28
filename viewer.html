@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sample Viewer · Placement Data Creator</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <h1>Sample Viewer</h1>
+        <p class="hint">Loads the sample's <code>.glb</code> files raw into one scene — no extra transforms applied, no <code>metadata.json</code> read.</p>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span>Sample</span>
+            <button id="reloadSamples" class="ghost">Rescan</button>
+          </div>
+          <label class="field">
+            <span>Dataset sample</span>
+            <select id="sampleSelect"></select>
+          </label>
+          <p id="sampleHint" class="hint"></p>
+          <p id="fileInfo" class="placement"></p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title"><span>Visibility</span></div>
+          <div class="row">
+            <button id="toggleA" class="seg active">A</button>
+            <button id="toggleB" class="seg active">B</button>
+          </div>
+          <div class="row">
+            <button id="frameView" class="seg">Frame</button>
+          </div>
+        </section>
+
+        <p class="hint"><a href="/">← Back to creator</a> &nbsp; <a href="/place.html">Place GLBs →</a> &nbsp; <a href="/pipeline.html">Pipeline viewer →</a></p>
+        <p id="status" class="status"></p>
+      </aside>
+
+      <main id="stage">
+        <div id="viewport"></div>
+        <div id="selInfo" class="badge">Pick a sample</div>
+      </main>
+    </div>
+    <script type="module" src="/src/sample-viewer.ts"></script>
+  </body>
+</html>

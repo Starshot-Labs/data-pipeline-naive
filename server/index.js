@@ -1,0 +1,182 @@
+import express from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Readable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
+
+const MODELS_DIR = process.env.MODELS_DIR ? path.resolve(process.env.MODELS_DIR) : path.join(ROOT, 'models');
+const DATASET_DIR = process.env.DATASET_DIR ? path.resolve(process.env.DATASET_DIR) : path.join(ROOT, 'dataset');
+const GENERATED_DIR = path.resolve(ROOT, process.env.GENERATED_DIR ?? 'generated');
+const DIST_DIR = path.join(ROOT, 'dist');
+const PORT = Number(process.env.PORT ?? 3000);
+
+fs.mkdirSync(MODELS_DIR, { recursive: true });
+fs.mkdirSync(DATASET_DIR, { recursive: true });
+fs.mkdirSync(GENERATED_DIR, { recursive: true });
+
+const app = express();
+app.use(express.json({ limit: '512mb' }));
+
+function listModels(dir, base = '') {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = base ? `${base}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) out.push(...listModels(path.join(dir, entry.name), rel));
+    else if (/\.(glb|gltf)$/i.test(entry.name)) out.push(rel);
+  }
+  return out;
+}
+
+app.get('/api/models', (_req, res) => {
+  try {
+    res.json({ models: listModels(MODELS_DIR).sort((a, b) => a.localeCompare(b)) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.use('/models', express.static(MODELS_DIR));
+app.use('/dataset', express.static(DATASET_DIR));
+app.use('/generated', express.static(GENERATED_DIR));
+
+// A posed mesh is read out of the sample's own folder when it is there, and pulled back from
+// the scene volume when it is not — baking writes to the volume, so whether a sample's GLBs
+// are local depends on whether anyone brought them down. Going through the server either way
+// keeps the viewer same-origin and spares it from knowing which of the two it got.
+const SCENE_BASE_URL = process.env.SCENE_BASE_URL ?? 'https://starshot-aitools--dc-scene-ops-web.modal.run';
+
+app.get('/mesh/:id/:name', async (req, res) => {
+  const id = path.basename(req.params.id);
+  const name = path.basename(req.params.name);
+
+  const local = path.join(GENERATED_DIR, id, name);
+  if (fs.existsSync(local)) return res.type('model/gltf-binary').sendFile(local);
+
+  const target = `${SCENE_BASE_URL}/file/${encodeURIComponent(id)}/${encodeURIComponent(name)}`;
+  try {
+    const upstream = await fetch(target, { signal: AbortSignal.timeout(120_000) });
+    if (!upstream.ok) return res.status(upstream.status).json({ error: `scene-ops ${upstream.status}` });
+    res.type('model/gltf-binary');
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
+
+const ROLES = ['anchor', 'placed'];
+
+const readMetadata = (dir) => {
+  const file = path.join(dir, 'metadata.json');
+  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+};
+
+/**
+ * The two GLBs a run loads, anchor first. A placed sample names them itself; a folder still on
+ * the old `spec.json` format names nothing, so they are taken off disk and ordered by the one
+ * convention both formats share — the anchor is the file named after the folder.
+ */
+function runMeshes(dir, id, metadata) {
+  if (metadata) return ROLES.map((role) => metadata[role]?.mesh).filter(Boolean);
+  const anchor = `${id}.glb`;
+  return fs
+    .readdirSync(dir)
+    .filter((file) => /\.glb$/i.test(file))
+    .sort((a, b) => (a === anchor ? -1 : b === anchor ? 1 : a.localeCompare(b)));
+}
+
+// Everything in generated/ with a pair of meshes to look at. A sample carries `combined_size`
+// once pipeline/run.mjs has posed it, and describes itself from there. A spec.json folder is
+// read for nothing but its id and shows its GLBs as they are, which for those is unposed.
+app.get('/api/runs', (_req, res) => {
+  try {
+    const runs = [];
+    for (const entry of fs.readdirSync(GENERATED_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(GENERATED_DIR, entry.name);
+      const metadata = readMetadata(dir);
+      if (metadata && !Array.isArray(metadata.combined_size)) continue;
+
+      const meshes = runMeshes(dir, entry.name, metadata);
+      if (meshes.length !== 2) continue;
+      runs.push({ id: entry.name, meshes, placed: !!metadata });
+    }
+    res.json({ runs: runs.sort((a, b) => a.id.localeCompare(b.id)) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Lists sample folders and the .glb files inside them. Reads directory entries
+// only — it never opens or parses metadata.json.
+app.get('/api/samples', (_req, res) => {
+  try {
+    const samples = fs
+      .readdirSync(DATASET_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => ({
+        id: e.name,
+        glbs: fs
+          .readdirSync(path.join(DATASET_DIR, e.name))
+          .filter((f) => /\.glb$/i.test(f))
+          .sort((a, b) => a.localeCompare(b)),
+      }))
+      .filter((s) => s.glbs.length > 0)
+      .sort((a, b) => a.id.localeCompare(b.id));
+    res.json({ samples });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+function nextSampleId() {
+  const existing = fs
+    .readdirSync(DATASET_DIR, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && /^sample_\d+$/.test(e.name))
+    .map((e) => Number(e.name.slice('sample_'.length)));
+  const next = existing.length ? Math.max(...existing) + 1 : 1;
+  return `sample_${String(next).padStart(4, '0')}`;
+}
+
+function sanitizeDirName(name) {
+  const base = path.basename(String(name ?? '')).trim().replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return base && base !== '.' && base !== '..' ? base : '';
+}
+
+app.post('/api/export', (req, res) => {
+  try {
+    const { dirName = '', placement = '', metadata = {}, files = {} } = req.body ?? {};
+    const id = sanitizeDirName(dirName) || nextSampleId();
+    const dir = path.join(DATASET_DIR, id);
+    fs.mkdirSync(dir, { recursive: true });
+
+    for (const [name, b64] of Object.entries(files)) {
+      const safe = path.basename(String(name));
+      fs.writeFileSync(path.join(dir, safe), Buffer.from(String(b64), 'base64'));
+    }
+
+    fs.writeFileSync(path.join(dir, 'placement.txt'), String(placement), 'utf8');
+    fs.writeFileSync(
+      path.join(dir, 'metadata.json'),
+      JSON.stringify({ id, ...metadata }, null, 2),
+      'utf8',
+    );
+
+    res.json({ id, path: dir });
+  } catch (err) {
+    res.status(500).json({ error: String(err?.stack ?? err) });
+  }
+});
+
+if (fs.existsSync(path.join(DIST_DIR, 'index.html'))) {
+  app.use(express.static(DIST_DIR));
+}
+
+app.listen(PORT, () => {
+  console.log(`data-creator server → http://localhost:${PORT}`);
+  console.log(`  models  : ${MODELS_DIR}`);
+  console.log(`  dataset : ${DATASET_DIR}`);
+  console.log(`  samples : ${GENERATED_DIR}`);
+});

@@ -1,0 +1,34 @@
+{
+  "name": "data-creator",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Client + pipeline to compose two GLB models and export relative-placement ML training samples.",
+  "scripts": {
+    "server": "node server/index.js",
+    "client": "vite",
+    "dev": "concurrently -k -n server,client -c blue,green \"npm:server\" \"npm:client\"",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "backfill": "node scripts/backfill-bbox.mjs",
+    "all": "node pipeline/all.mjs",
+    "images": "node pipeline/build-images.mjs",
+    "meshes": "node pipeline/build-meshes.mjs",
+    "generate": "node pipeline/build.mjs",
+    "pipeline": "node pipeline/run.mjs",
+    "upload": "node pipeline/upload.mjs",
+    "deploy": "modal deploy modal/scene_ops.py"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "fzstd": "^0.1.1",
+    "sharp": "^0.35.3",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.1",
+    "concurrently": "^10.0.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5"
+  }
+}

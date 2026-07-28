@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GLB Placement Data Creator</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <h1>Placement Data Creator</h1>
+        <p class="hint"><a href="/place.html">Place GLBs →</a> &nbsp; <a href="/viewer.html">Sample viewer →</a> &nbsp; <a href="/pipeline.html">Pipeline viewer →</a></p>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span>Models</span>
+            <button id="reloadModels" class="ghost" title="Rescan models folder">Rescan</button>
+          </div>
+
+          <label class="field">
+            <span class="tag tag-a">A · anchor</span>
+            <select id="modelA"></select>
+          </label>
+
+          <label class="field">
+            <span class="tag tag-b">B</span>
+            <select id="modelB"></select>
+          </label>
+
+          <p id="modelsHint" class="hint"></p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title"><span>Transform</span></div>
+
+          <div class="row" role="group" aria-label="Active object">
+            <button id="selectA" class="seg">Select A</button>
+            <button id="selectB" class="seg">Select B</button>
+          </div>
+
+          <div class="row" role="group" aria-label="Gizmo mode">
+            <button id="modeTranslate" class="seg active">Move <kbd>W</kbd></button>
+            <button id="modeRotate" class="seg">Rotate <kbd>E</kbd></button>
+            <button id="modeScale" class="seg">Scale <kbd>R</kbd></button>
+          </div>
+
+          <div class="row">
+            <button id="spaceToggle" class="seg" title="Gizmo reference frame">Space: World</button>
+            <button id="snapToggle" class="seg" title="Snap to increments">Snap: Off</button>
+          </div>
+
+          <div class="row">
+            <button id="toggleA" class="seg">Hide A</button>
+            <button id="toggleB" class="seg">Hide B</button>
+          </div>
+
+          <div class="row">
+            <button id="resetA" class="seg">Reset A</button>
+            <button id="resetB" class="seg">Reset B</button>
+            <button id="frameView" class="seg" title="Frame both objects">Frame <kbd>F</kbd></button>
+          </div>
+
+          <p class="hint">Click an object to select. Drag the gizmo to place. <kbd>W</kbd>/<kbd>E</kbd>/<kbd>R</kbd> switch move/rotate/scale.</p>
+        </section>
+      </aside>
+
+      <main id="stage">
+        <div id="viewport"></div>
+        <div id="selInfo" class="badge">Nothing selected</div>
+      </main>
+
+      <aside id="inspector">
+        <section class="panel">
+          <div class="panel-title"><span>Placement description</span></div>
+          <textarea id="placement" rows="4" placeholder="Describe how B is placed relative to A (e.g. &quot;B sits centered on top of A, rotated 90 degrees to face left&quot;)."></textarea>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title"><span>Bounding-box ratios</span></div>
+          <div id="bboxA" class="bbox"></div>
+          <div id="bboxAB" class="bbox"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title"><span>Export</span></div>
+          <button id="exportBtn" class="primary" disabled>Export sample</button>
+          <p id="status" class="status"></p>
+        </section>
+      </aside>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,26 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# user-provided source models (large binaries)
+models/*
+!models/.gitkeep
+
+# generated dataset samples
+dataset/*
+!dataset/.gitkeep
+
+# pipeline output
+generated/
+generated-1/
+generated-phrasing-test/
+dataset/
+test-2/
+out/
+
+.env
+
+.trellis-campaign.json
+.trellis-stage/
+__pycache__/

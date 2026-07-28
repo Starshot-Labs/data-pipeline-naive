@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Place GLBs · Placement Data Creator</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <h1>Place GLBs</h1>
+        <p class="hint">Upload two GLBs from anywhere on disk. Both enter the scene with the transform baked into the file, so a pair that is already posed stays posed.</p>
+
+        <section class="panel">
+          <div class="panel-title"><span>Upload</span></div>
+
+          <label class="field">
+            <span class="tag tag-a">A · anchor</span>
+            <span class="drop" id="dropA">
+              <input type="file" id="fileA" accept=".glb,.gltf" multiple hidden />
+              <span id="nameA">Drop a .glb, or click to choose</span>
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="tag tag-b">B</span>
+            <span class="drop" id="dropB">
+              <input type="file" id="fileB" accept=".glb,.gltf" multiple hidden />
+              <span id="nameB">Drop a .glb, or click to choose</span>
+            </span>
+          </label>
+
+          <p class="hint">Two files at once fill both slots, and a drop anywhere on the page works. Nothing is sent to the server — the files are read in the browser.</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title"><span>Transform</span></div>
+
+          <div class="row" role="group" aria-label="Active object">
+            <button id="selectA" class="seg">Select A</button>
+            <button id="selectB" class="seg">Select B</button>
+          </div>
+
+          <div class="row" role="group" aria-label="Gizmo mode">
+            <button id="modeTranslate" class="seg active">Move <kbd>W</kbd></button>
+            <button id="modeRotate" class="seg">Rotate <kbd>E</kbd></button>
+            <button id="modeScale" class="seg">Scale <kbd>R</kbd></button>
+          </div>
+
+          <div class="row">
+            <button id="spaceToggle" class="seg" title="Gizmo reference frame">Space: World</button>
+            <button id="snapToggle" class="seg" title="Snap to increments">Snap: Off</button>
+          </div>
+
+          <div class="row">
+            <button id="toggleA" class="seg">Hide A</button>
+            <button id="toggleB" class="seg">Hide B</button>
+          </div>
+
+          <div class="row">
+            <button id="resetA" class="seg">Reset A</button>
+            <button id="resetB" class="seg">Reset B</button>
+            <button id="frameView" class="seg" title="Frame both objects">Frame <kbd>F</kbd></button>
+          </div>
+
+          <p class="hint">Click an object to select. Drag the gizmo to move it off its file pose; <b>Reset</b> puts it back.</p>
+        </section>
+
+        <p class="hint"><a href="/">← Creator</a> &nbsp; <a href="/viewer.html">Sample viewer →</a> &nbsp; <a href="/pipeline.html">Pipeline viewer →</a></p>
+        <p id="status" class="status"></p>
+      </aside>
+
+      <main id="stage">
+        <div id="viewport"></div>
+        <div id="selInfo" class="badge">Nothing selected</div>
+      </main>
+
+      <aside id="inspector">
+        <section class="panel">
+          <div class="panel-title"><span>Objects</span></div>
+          <div id="infoA" class="bbox"></div>
+          <div id="infoB" class="bbox"></div>
+          <p class="hint">Size and center are world-space. Rotated and scaled are what you have added on top of the file pose.</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title"><span>Together</span></div>
+          <div id="infoAB" class="bbox"></div>
+        </section>
+      </aside>
+    </div>
+
+    <script type="module" src="/src/place.ts"></script>
+  </body>
+</html>

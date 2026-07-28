@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Pipeline Viewer · Placement Data Creator</title>
+	</head>
+	<body>
+		<div id="app">
+			<aside id="sidebar">
+				<h1>Pipeline Viewer</h1>
+				<p class="hint">
+					Output of <code>pipeline/run.mjs</code>: the anchor and the
+					LLM-placed object, both with their transform baked in.
+					Older <code>spec.json</code> folders load too, unposed.
+				</p>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Run</span>
+						<button id="reloadRuns" class="ghost">Rescan</button>
+					</div>
+					<label class="field">
+						<span>Pipeline run</span>
+						<select id="runSelect"></select>
+					</label>
+					<p id="runHint" class="hint"></p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>Show</span></div>
+					<div class="row">
+						<button id="toggleAnchor" class="seg active">
+							Anchor
+						</button>
+						<button id="togglePlaced" class="seg active">
+							Placed
+						</button>
+					</div>
+					<div class="row">
+						<button id="frameView" class="seg">
+							Frame <kbd>F</kbd>
+						</button>
+					</div>
+					<p class="hint">
+						Both meshes carry their pose in the file, so nothing
+						here transforms them.
+					</p>
+				</section>
+
+				<p class="hint">
+					<a href="/">← Creator</a> &nbsp;
+					<a href="/place.html">Place GLBs →</a> &nbsp;
+					<a href="/viewer.html">Sample viewer →</a>
+				</p>
+				<p id="status" class="status"></p>
+			</aside>
+
+			<main id="stage">
+				<div id="viewport"></div>
+				<div id="selInfo" class="badge">Pick a run</div>
+			</main>
+
+			<aside id="inspector">
+				<section class="panel">
+					<div class="panel-title"><span>Placement</span></div>
+					<p id="placement" class="placement"></p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>Sample</span></div>
+					<div id="numbers" class="bbox"></div>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>Objects</span></div>
+					<div id="descriptions"></div>
+				</section>
+			</aside>
+		</div>
+		<script type="module" src="/src/pipeline-viewer.ts"></script>
+	</body>
+</html>
