@@ -14,16 +14,26 @@ bit-for-bit. Placing an object becomes an edit rather than a second mesh plus a 
 It cannot run on a laptop — 40 GB of VRAM minimum, Linux, and a stack of CUDA extensions —
 which is why it lives here next to the rest of this project's GPU work.
 
-The three documented steps run as the paper's own entry points, in the paper's order:
+The paper's steps run as its own entry points, but split across two HTTP calls so the
+inpaint can happen off-GPU on the caller's side:
 
-    utils/render_rgb_and_mask.py   5 RGB views + the 2D mask, by depth comparison
-    utils/inpaint.py               FLUX.1-Fill-dev paints the object into the masked view
-    inference.py                   150-view render, DINOv2 features, voxel mask, edit
+    POST /render   utils/render_rgb_and_mask.py   5 RGB views + the 2D mask, by depth
+                                                   comparison; picks the most-visible view
+    (caller)       the object is inserted into that view — see below
+    POST /edit     inference.py                   150-view render, DINOv2 features, voxel
+                                                   mask, invert + re-denoise, decode
 
-The first two are subprocesses because that is how the README drives them, and because it
-keeps `bpyrenderer`'s Blender session away from the one `inference.py` opens later. The
-third is called in-process as `run_complete_pipeline`, the function its own CLI calls, so
-that `render_params` can carry `scale=1, offset=(0,0,0)`.
+The inpaint that VoxHammer runs with FLUX.1-Fill-dev is deliberately NOT here. FLUX is
+conditioned on text alone, so it never sees the object being placed and hallucinates one
+from the phrase. `2d_edit.png` is a documented interface — `render_rgb_and_mask.py` produces
+the view, `run_edit` consumes the edited copy — so the caller makes it instead, with a
+reference-image edit (nano-banana) that is shown the actual object photo. The GPU service
+keeps only VoxHammer's own method, unmodified; the swap is at the seam the paper already has.
+
+`render_rgb_and_mask.py` is a subprocess because that is how the README drives it, and
+because it keeps `bpyrenderer`'s Blender session away from the one `inference.py` opens
+later. The edit is called in-process as `run_complete_pipeline`, the function its own CLI
+calls, so that `render_params` can carry `scale=1, offset=(0,0,0)`.
 
 That last detail is the whole ballgame for correctness. `bpy_render` normalizes the model
 it renders, while `delete_region_voxel` imports the mask with no normalization at all and
@@ -216,8 +226,8 @@ def _pick_view(images_dir: Path) -> tuple[Path, Path]:
     """The view showing most of the editable region.
 
     The README leaves this to the eye — "select one pair" — which a batch cannot do. The
-    mask is what FLUX paints into and what the cross-attention mask is built from, so the
-    most useful view is simply the one where the most of it is visible.
+    mask is what the object gets inserted into and what the cross-attention mask is built
+    from, so the most useful view is simply the one where the most of it is visible.
     """
     import cv2
 
@@ -241,22 +251,74 @@ def _run(command: list[str], stage: str) -> None:
         raise RuntimeError(f"{stage} failed:\n{done.stdout[-2000:]}\n{done.stderr[-3000:]}")
 
 
-@app.function(
-    image=image,
-    volumes=VOLUMES,
-    secrets=[HF_SECRET],
-    gpu=GPU,
-    timeout=3 * 60 * 60,
-)
-def edit(job_id: str, prompt: str) -> None:
-    """One sample through the paper's outline. Progress goes to the Dict, output to the volume."""
+def _fail(job_id: str, err: Exception) -> None:
+    jobs_volume.commit()
+    jobs[job_id] = {**jobs[job_id], "status": "failed", "error": f"{type(err).__name__}: {err}", "updated_at": time.time()}
+
+
+@app.function(image=image, volumes=VOLUMES, gpu=GPU, timeout=30 * 60)
+def render(job_id: str) -> None:
+    """Step 3: the 5 RGB views and their 2D masks, then the pick of the most-visible one.
+
+    Writes `images/2d_render.png` and `images/2d_mask.png` — the view the caller inserts the
+    object into, and the region to insert it in — and stops. No weights, no A100-scale work;
+    just Blender. Resumes for free, since a second call finds both files already there.
+    """
+    work = Path(JOBS) / job_id
+    images = work / "images"
+    uploads = work / "inputs"
+
+    def stage(name: str) -> None:
+        jobs[job_id] = {**jobs[job_id], "stage": name, "updated_at": time.time()}
+        print(f"[{job_id}] {name}", flush=True)
+
+    started = time.time()
+    try:
+        view = jobs[job_id].get("view")
+        if not ((images / "2d_render.png").is_file() and (images / "2d_mask.png").is_file()):
+            stage("render views")
+            _run(
+                [
+                    "python", "utils/render_rgb_and_mask.py",
+                    "--source_model", str(uploads / "model.glb"),
+                    "--mask_model", str(uploads / "mask.glb"),
+                    "--output_dir", str(work),
+                ],
+                "render_rgb_and_mask",
+            )
+            render_path, mask_path = _pick_view(images)
+            shutil.copy(render_path, images / "2d_render.png")
+            shutil.copy(mask_path, images / "2d_mask.png")
+            view = render_path.name
+
+        jobs_volume.commit()
+        jobs[job_id] = {
+            **jobs[job_id],
+            "status": "done",
+            "stage": "rendered",
+            "view": view,
+            "files": ["images/2d_render.png", "images/2d_mask.png"],
+            "seconds": round(time.time() - started, 1),
+            "updated_at": time.time(),
+        }
+    except Exception as err:  # noqa: BLE001 — the message is the only thing the client can act on
+        _fail(job_id, err)
+        raise
+
+
+@app.function(image=image, volumes=VOLUMES, secrets=[HF_SECRET], gpu=GPU, timeout=3 * 60 * 60)
+def edit(job_id: str) -> None:
+    """Steps 5-6: 150-view render, DINOv2 features, voxel mask, invert + re-denoise, decode.
+
+    Expects `images/{2d_render,2d_mask,2d_edit}.png` — the first two from `render`, the third
+    the caller's inserted-object image. Everything in `run_complete_pipeline` is VoxHammer's,
+    unchanged; only `render_params` is passed, to keep its renderer from re-normalizing the
+    meshes out of the frame the mask was built in.
+    """
     import torch
 
     work = Path(JOBS) / job_id
     images = work / "images"
-    # `render_rgb_and_mask.py` finishes by copying its two inputs into the output directory
-    # as model.glb and mask.glb, so the uploads cannot already live at those names — and the
-    # copies it makes are what the edit step is then pointed at, exactly as the README has it.
     uploads = work / "inputs"
 
     def stage(name: str) -> None:
@@ -270,45 +332,12 @@ def edit(job_id: str, prompt: str) -> None:
         marks[name] = round(time.time() - started, 1)
 
     try:
-        # Every step skips what is already on the volume. A job id is a hash of its inputs,
-        # so this only ever reuses work done for exactly these two meshes and this prompt —
-        # and a retry after a failure further down costs neither the render nor the inpaint.
-        # Upstream's own steps do the same: `run_3d_rendering` returns early when
-        # transforms.json and mesh.ply are there.
-        if not any(images.glob("mask_*.png")):
-            # Step 3a — the five RGB views and the 2D mask that pairs with each of them.
-            stage("render views")
-            _run(
-                [
-                    "python", "utils/render_rgb_and_mask.py",
-                    "--source_model", str(uploads / "model.glb"),
-                    "--mask_model", str(uploads / "mask.glb"),
-                    "--output_dir", str(work),
-                ],
-                "render_rgb_and_mask",
-            )
-            mark("render_views")
+        # The edited image was written by the web container; pull its commit before reading.
+        jobs_volume.reload()
+        for required in ("2d_render.png", "2d_mask.png", "2d_edit.png"):
+            if not (images / required).is_file():
+                raise RuntimeError(f"missing images/{required} — call /render and supply the edited image first")
 
-        render_path, mask_path = _pick_view(images)
-        if not (images / "2d_edit.png").is_file():
-            # Step 3b — FLUX paints the object into the hole. This is the only place the
-            # phrase is used: the edit itself is conditioned on the image, not the text.
-            stage(f"inpaint {render_path.name}")
-            _run(
-                [
-                    "python", "utils/inpaint.py",
-                    "--image_path", str(render_path),
-                    "--mask_path", str(mask_path),
-                    "--output_dir", str(images),
-                    "--prompt", prompt,
-                ],
-                "inpaint",
-            )
-            mark("inpaint")
-            jobs_volume.commit()
-
-        # Step 5 — invert and re-denoise. Called rather than shelled out so `render_params`
-        # can switch off the normalization that would break the mask's frame.
         stage("load pipeline")
         # Both the voxel masking step and TRELLIS's own configs reach for `assets/…` by
         # relative path, so the repo has to be the working directory, not just on the path.
@@ -329,8 +358,8 @@ def edit(job_id: str, prompt: str) -> None:
         stage("render, features, voxel mask, edit")
         run_complete_pipeline(
             pipeline=pipeline,
-            input_model_path=str(work / "model.glb"),
-            mask_glb_path=str(work / "mask.glb"),
+            input_model_path=str(uploads / "model.glb"),
+            mask_glb_path=str(uploads / "mask.glb"),
             render_dir=str(work / "render"),
             output_path=str(work / "output.glb"),
             image_dir=str(images),
@@ -355,21 +384,14 @@ def edit(job_id: str, prompt: str) -> None:
             "stage": "done",
             "files": landed,
             "record": {
-                "prompt": prompt,
-                "view": render_path.name,
+                "view": jobs[job_id].get("view"),
                 "seconds": marks,
                 "total_seconds": round(time.time() - started, 1),
             },
             "updated_at": time.time(),
         }
     except Exception as err:  # noqa: BLE001 — the message is the only thing the client can act on
-        jobs_volume.commit()
-        jobs[job_id] = {
-            **jobs[job_id],
-            "status": "failed",
-            "error": f"{type(err).__name__}: {err}",
-            "updated_at": time.time(),
-        }
+        _fail(job_id, err)
         raise
 
 
@@ -405,21 +427,20 @@ def web():
     def health():
         return {"ok": True, "gpu": GPU, "artifacts": ARTIFACTS}
 
-    @api.post("/edit")
-    async def start(
+    @api.post("/render")
+    async def start_render(
         model: UploadFile = File(...),
         mask: UploadFile = File(...),
-        prompt: str = Form(...),
         sample: str = Form(""),
     ):
-        """Both meshes must already be in TRELLIS's cube — see the module docstring."""
+        """Step 3. Both meshes must already be in TRELLIS's cube — see the module docstring.
+
+        The job id is a hash of the two meshes, so re-posting the same pair attaches to the
+        render already taken for it, and `/edit` addresses that same job by id.
+        """
         model_bytes = await model.read()
         mask_bytes = await mask.read()
-
-        # The id is the inputs: re-posting the same sample with the same meshes and phrase
-        # picks up where the last attempt left off, while a changed mask starts a new job
-        # rather than quietly reusing renders taken against the old one.
-        digest = hashlib.sha256(model_bytes + mask_bytes + prompt.encode()).hexdigest()[:10]
+        digest = hashlib.sha256(model_bytes + mask_bytes).hexdigest()[:10]
         job_id = f"vh-{re.sub(r'[^a-z0-9-]+', '-', sample.lower()) or 'job'}-{digest}"
 
         uploads = Path(JOBS) / job_id / "inputs"
@@ -432,11 +453,25 @@ def web():
             "status": "pending",
             "stage": "queued",
             "sample": sample,
-            "prompt": prompt,
             "created_at": time.time(),
         }
-        edit.spawn(job_id, prompt)
+        render.spawn(job_id)
         return {"job_id": job_id, "sample": sample}
+
+    @api.post("/edit")
+    async def start_edit(job_id: str = Form(...), edit_image: UploadFile = File(...)):
+        """Steps 5-6 for a job `/render` already prepared, against the caller's edited view."""
+        if job_id not in jobs:
+            raise HTTPException(status_code=404, detail=f"no job {job_id} — call /render first")
+
+        images = Path(JOBS) / job_id / "images"
+        images.mkdir(parents=True, exist_ok=True)
+        (images / "2d_edit.png").write_bytes(await edit_image.read())
+        jobs_volume.commit()
+
+        jobs[job_id] = {**jobs[job_id], "status": "pending", "stage": "queued-edit", "updated_at": time.time()}
+        edit.spawn(job_id)
+        return {"job_id": job_id}
 
     @api.get("/jobs/{job_id}")
     def status(job_id: str):
