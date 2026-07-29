@@ -10,12 +10,16 @@ const ROOT = path.resolve(__dirname, '..');
 const MODELS_DIR = process.env.MODELS_DIR ? path.resolve(process.env.MODELS_DIR) : path.join(ROOT, 'models');
 const DATASET_DIR = process.env.DATASET_DIR ? path.resolve(process.env.DATASET_DIR) : path.join(ROOT, 'dataset');
 const GENERATED_DIR = path.resolve(ROOT, process.env.GENERATED_DIR ?? 'generated');
+const PLACEMENT_RESULTS_DIR = path.resolve(ROOT, process.env.PLACEMENT_RESULTS_DIR ?? 'placement-results');
+const EDIT_RESULTS_DIR = path.resolve(ROOT, process.env.EDIT_RESULTS_DIR ?? 'edit-results');
 const DIST_DIR = path.join(ROOT, 'dist');
 const PORT = Number(process.env.PORT ?? 3000);
 
 fs.mkdirSync(MODELS_DIR, { recursive: true });
 fs.mkdirSync(DATASET_DIR, { recursive: true });
 fs.mkdirSync(GENERATED_DIR, { recursive: true });
+fs.mkdirSync(PLACEMENT_RESULTS_DIR, { recursive: true });
+fs.mkdirSync(EDIT_RESULTS_DIR, { recursive: true });
 
 const app = express();
 app.use(express.json({ limit: '512mb' }));
@@ -41,6 +45,8 @@ app.get('/api/models', (_req, res) => {
 app.use('/models', express.static(MODELS_DIR));
 app.use('/dataset', express.static(DATASET_DIR));
 app.use('/generated', express.static(GENERATED_DIR));
+app.use('/placement-results', express.static(PLACEMENT_RESULTS_DIR));
+app.use('/edit-results', express.static(EDIT_RESULTS_DIR));
 
 // A posed mesh is read out of the sample's own folder when it is there, and pulled back from
 // the scene volume when it is not — baking writes to the volume, so whether a sample's GLBs
@@ -104,6 +110,72 @@ app.get('/api/runs', (_req, res) => {
       runs.push({ id: entry.name, meshes, placed: !!metadata });
     }
     res.json({ runs: runs.sort((a, b) => a.id.localeCompare(b.id)) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/**
+ * The placement benchmark: every generated sample and, per sample, the models that
+ * have posed it. A sample is listed from `generation.json` alone, so one whose meshes
+ * exist but which no model has placed yet still shows up with an empty model list.
+ */
+app.get('/api/placements', (_req, res) => {
+  try {
+    const samples = [];
+    for (const entry of fs.readdirSync(PLACEMENT_RESULTS_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(PLACEMENT_RESULTS_DIR, entry.name);
+      const generation = path.join(dir, 'generation.json');
+      if (!fs.existsSync(generation)) continue;
+
+      const models = [];
+      for (const sub of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!sub.isDirectory()) continue;
+        const meta = path.join(dir, sub.name, 'placement.json');
+        if (!fs.existsSync(meta)) continue;
+        models.push({ slug: sub.name, model: JSON.parse(fs.readFileSync(meta, 'utf8')).model ?? sub.name });
+      }
+
+      const { placement = '', anchor = {}, placed = {} } = JSON.parse(fs.readFileSync(generation, 'utf8'));
+      samples.push({
+        id: entry.name,
+        placement,
+        anchor_view: anchor.view_image ?? null,
+        generated_image: placed.generated_image ?? null,
+        models: models.sort((a, b) => a.model.localeCompare(b.model)),
+      });
+    }
+    res.json({ samples: samples.sort((a, b) => a.id.localeCompare(b.id)) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/**
+ * The editing experiment: every sample pipeline/test-edit.mjs has masked, and whether the GPU
+ * half finished it too. Each phase is listed off the file it writes last — mask.json locally,
+ * edit.json for the service — so a folder mid-write is never offered as ready. The 2D views
+ * are read off disk rather than assumed, since a job hands back only the ones it produced.
+ */
+app.get('/api/edits', (_req, res) => {
+  try {
+    const samples = [];
+    for (const entry of fs.readdirSync(EDIT_RESULTS_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(EDIT_RESULTS_DIR, entry.name);
+      const mask = path.join(dir, 'mask.json');
+      if (!fs.existsSync(mask)) continue;
+
+      const images = path.join(dir, 'images');
+      samples.push({
+        id: entry.name,
+        placement: JSON.parse(fs.readFileSync(mask, 'utf8')).placement ?? '',
+        edited: fs.existsSync(path.join(dir, 'edit.json')),
+        views: fs.existsSync(images) ? fs.readdirSync(images).filter((file) => /\.png$/i.test(file)) : [],
+      });
+    }
+    res.json({ samples: samples.sort((a, b) => a.id.localeCompare(b.id)) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

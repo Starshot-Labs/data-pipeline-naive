@@ -10,7 +10,7 @@ const SAMPLES_PER_VOXEL = 2;
 const SUBDIVISION = 3;
 const MIN_FILL = 0.2;
 
-function bounds(triangles) {
+export function bounds(triangles) {
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < triangles.length; i += 3) {
@@ -112,6 +112,18 @@ function downsample(fine, fineDims, dims) {
   return data;
 }
 
+/**
+ * Occupancy on a lattice the caller picks: `dims` cubic cells of `voxelSize` with the
+ * grid's minimum corner at `gridMin`. For when the grid has to line up with something
+ * else's — a fixed 64³ cube, say — rather than with the mesh's own bounds.
+ */
+export function voxelizeLattice(triangles, { dims, voxelSize, gridMin }) {
+  const fineDims = dims.map((d) => d * SUBDIVISION);
+  const fine = rasterize(triangles, fineDims, voxelSize / SUBDIVISION, gridMin);
+  floodOutside(fine, fineDims);
+  return downsample(fine, fineDims, dims);
+}
+
 export function voxelize(triangles, resolution) {
   const { min, max } = bounds(triangles);
   const size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
@@ -124,11 +136,7 @@ export function voxelize(triangles, resolution) {
   const origin = dims.map((d) => (-d * voxelSize) / 2);
   const gridMin = [center[0] + origin[0], center[1] + origin[1], center[2] + origin[2]];
 
-  const fineDims = dims.map((d) => d * SUBDIVISION);
-  const fine = rasterize(triangles, fineDims, voxelSize / SUBDIVISION, gridMin);
-  floodOutside(fine, fineDims);
-
-  return { dims, voxelSize, origin, center, size, data: downsample(fine, fineDims, dims) };
+  return { dims, voxelSize, origin, center, size, data: voxelizeLattice(triangles, { dims, voxelSize, gridMin }) };
 }
 
 /** One string per Y layer, indexed bottom-up. Each layer has `dz` rows of `dx` characters. */

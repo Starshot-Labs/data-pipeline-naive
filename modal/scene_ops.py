@@ -24,6 +24,7 @@ from __future__ import annotations  # the local CLI may be older than the contai
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import modal
@@ -55,41 +56,103 @@ VOLUMES = {"/farm-out": farm_out, "/farm-in": farm_in, "/scene": scene}
 # Kept in step with the defaults in ops.mjs; only the file route needs it on this side.
 PUBLISH_PREFIX = "datasets/raw/stage1"
 
+# Exit code `ops.mjs` uses for a file that is not on the volume. Kept in step with the
+# constant there.
+MISSING_INPUT = 17
+
 # What each command touches, which is what decides when to reload and when to commit.
 READS_FARM = {"assets", "collect"}
-READS_SCENE = {"stage", "voxelize", "bake", "published"}
+# These read the scene volume once a run, so syncing up front costs nothing at that rate.
+READS_SCENE = {"stage", "published"}
+# These read it once a sample. The meshes they read are written by `collect` and stop changing
+# when stage 3 ends, so reloading before each of tens of thousands of calls re-syncs a snapshot
+# that is already right — a third of a second every time, growing with the file count of the
+# whole volume. They reload on a missing input instead, which is the only symptom a snapshot
+# older than the write has.
+RELOADS_ON_MISS = {"voxelize", "bake"}
 WRITES_SCENE = {"collect", "bake", "publish"}
+# Which of those has someone waiting on the write. Collect hands its meshes to the placement
+# stage, and publish is what marks a sample finished, so both push before replying. Nothing
+# reads a posed mesh until stage 7, so bake rides a timer along with every bake since the last
+# one — a commit costs three quarters of a second before it moves a byte, and at four files a
+# sample that fixed cost is most of what baking spends.
+COMMITS_ON_REPLY = {"collect", "publish"}
 # Staging is the one thing that writes the farm's side. It has to be committed before the
 # campaign starts, or `/run` walks the input volume and finds nothing there.
 WRITES_FARM_IN = {"stage"}
 
-COMMANDS = READS_FARM | READS_SCENE | WRITES_SCENE | WRITES_FARM_IN
+COMMANDS = READS_FARM | READS_SCENE | RELOADS_ON_MISS | WRITES_SCENE | WRITES_FARM_IN
+
+# How long a coalesced write may go unpushed. Bounded rather than left to the container's
+# lifetime so an ungraceful death costs a handful of posed meshes, which the next pass rebakes
+# from the raw ones it never touches.
+COMMIT_EVERY_S = 15
 
 # Volume reload discards nothing only while no sibling request has written without
 # committing, so a container runs its operations one at a time. The work is a fifth of a
 # second per sample; throughput comes from more containers, not from interleaving here.
 _volumes = threading.Lock()
+# Whether this container is holding scene writes back, and when it last let go. Both are only
+# touched under `_volumes`.
+_scene_dirty = False
+_scene_pushed = time.monotonic()
+
+
+def _commit_scene() -> None:
+    global _scene_dirty, _scene_pushed
+    scene.commit()
+    _scene_dirty = False
+    _scene_pushed = time.monotonic()
+
+
+def _reload_scene() -> None:
+    """Push before pulling, always: a reload can drop writes this container has not committed
+    yet, and holding bakes back means there are usually some waiting."""
+    if _scene_dirty:
+        _commit_scene()
+    scene.reload()
+
+
+def _node(command: str, payload: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["node", "/app/pipeline/ops.mjs", command],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
 
 
 def run_op(command: str, payload: dict) -> dict:
+    global _scene_dirty
+
     with _volumes:
         if command in READS_FARM:
             farm_out.reload()
             farm_in.reload()
         if command in READS_SCENE:
-            scene.reload()
+            _reload_scene()
 
-        done = subprocess.run(
-            ["node", "/app/pipeline/ops.mjs", command],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-        )
+        # Marked before the run, not after it: a command that failed halfway has still left
+        # whatever it wrote before that, and the reload below must not pull over the top of it.
+        if command in WRITES_SCENE:
+            _scene_dirty = True
+
+        done = _node(command, payload)
+        # One reload and one retry, so a container warmer than the write pays for the gap once
+        # instead of on every call. Both commands re-run cleanly: voxelize only reads, and bake
+        # rewrites the same posed copies from raw meshes it leaves alone.
+        if done.returncode == MISSING_INPUT and command in RELOADS_ON_MISS:
+            _reload_scene()
+            done = _node(command, payload)
+
         if done.returncode != 0:
             raise RuntimeError(f"{command} failed: {done.stderr[-2000:]}")
 
-        if command in WRITES_SCENE:
-            scene.commit()
+        # A commit pushes everything this container has written, so one made for its own sake
+        # carries any held-back bakes with it — as does the next request of any kind once the
+        # timer is up, which is what keeps the window closing without a thread to close it.
+        if command in COMMITS_ON_REPLY or (_scene_dirty and time.monotonic() - _scene_pushed >= COMMIT_EVERY_S):
+            _commit_scene()
         if command in WRITES_FARM_IN:
             farm_in.commit()
         return json.loads(done.stdout)
@@ -115,7 +178,7 @@ def web():
         """One published file, so the viewer can show a sample without anyone downloading
         the dataset. `.name` on both parts keeps a crafted path inside the prefix."""
         with _volumes:
-            scene.reload()
+            _reload_scene()
             target = Path("/scene") / PUBLISH_PREFIX / Path(sample).name / Path(name).name
             if not target.is_file():
                 raise HTTPException(status_code=404, detail=f"no {name} for {sample}")

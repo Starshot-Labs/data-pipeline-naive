@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Placement Benchmark · Placement Data Creator</title>
+	</head>
+	<body>
+		<div id="app">
+			<aside id="sidebar">
+				<h1>Placement Benchmark</h1>
+				<p class="hint">
+					Output of <code>pipeline/test-place.mjs</code>: one anchor,
+					one generated mesh, and a pose per model. Every mesh carries
+					its pose in the file.
+				</p>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Sample</span>
+						<button id="reloadRuns" class="ghost">Rescan</button>
+					</div>
+					<label class="field">
+						<select id="runSelect"></select>
+					</label>
+					<p id="runHint" class="hint"></p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Models</span>
+						<button id="showAll" class="ghost">All</button>
+					</div>
+					<div id="models" class="models"></div>
+					<p class="hint">
+						<kbd>1</kbd>–<kbd>9</kbd> solo a model,
+						<kbd>0</kbd> show all.
+					</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>View</span></div>
+					<div class="row">
+						<button id="toggleAnchor" class="seg active">
+							Anchor
+						</button>
+						<button id="toggleTextured" class="seg">
+							Textured
+						</button>
+					</div>
+					<div class="row">
+						<button id="frameView" class="seg">
+							Frame <kbd>F</kbd>
+						</button>
+					</div>
+				</section>
+
+				<p class="hint">
+					<a href="/pipeline.html">← Pipeline</a> &nbsp;
+					<a href="/edit.html">Edit results →</a> &nbsp;
+					<a href="/place.html">Place GLBs →</a>
+				</p>
+				<p id="status" class="status"></p>
+			</aside>
+
+			<main id="stage">
+				<div id="viewport"></div>
+				<div id="selInfo" class="badge">Pick a sample</div>
+			</main>
+
+			<aside id="inspector">
+				<section class="panel">
+					<div class="panel-title"><span>Placement</span></div>
+					<p id="placement" class="placement"></p>
+					<div id="shared"></div>
+				</section>
+
+				<div id="cards"></div>
+			</aside>
+		</div>
+		<script type="module" src="/src/placement-viewer.ts"></script>
+	</body>
+</html>

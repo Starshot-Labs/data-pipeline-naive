@@ -10,9 +10,11 @@ export default defineConfig({
       '/api': backend,
       '/models': backend,
       '/dataset': backend,
-      // Without these two the dev server answers a sample's meshes and images with its own
+      // Without these the dev server answers a sample's meshes and images with its own
       // HTML fallback, and honouring GENERATED_DIR is the backend's job either way.
       '/generated': backend,
+      '/placement-results': backend,
+      '/edit-results': backend,
       '/mesh': backend,
       '/out': backend,
     },
@@ -26,6 +28,8 @@ export default defineConfig({
         place: resolve(__dirname, 'place.html'),
         viewer: resolve(__dirname, 'viewer.html'),
         pipeline: resolve(__dirname, 'pipeline.html'),
+        placement: resolve(__dirname, 'placement.html'),
+        edit: resolve(__dirname, 'edit.html'),
       },
     },
   },

@@ -55,14 +55,21 @@ function retryDelay(detail) {
 }
 
 /** One request. Either the image, or how the failure wants to be retried. */
-async function attempt({ apiKey, model, prompt }) {
+async function attempt({ apiKey, model, prompt, images }) {
+  // Input images go ahead of the text, so a prompt can point at them as
+  // "image 1", "image 2" in the order the caller supplied them.
+  const parts = [
+    ...images.map(({ mimeType, data }) => ({ inlineData: { mimeType, data: data.toString('base64') } })),
+    { text: prompt },
+  ];
+
   let response;
   try {
     response = await fetch(`${BASE_URL}/${model}:generateContent`, {
       method: 'POST',
       headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts }],
         generationConfig: {
           imageConfig: { aspectRatio: ASPECT_RATIO, imageSize: IMAGE_SIZE },
           thinkingConfig: { thinkingLevel: THINKING_LEVEL, includeThoughts: false },
@@ -102,8 +109,11 @@ async function attempt({ apiKey, model, prompt }) {
  * Text-to-image, returning PNG bytes and retrying on its own rather than handing the failure
  * back. Callers persist per image and the next run re-renders whatever is missing, so giving
  * up early is only ever paid for later.
+ *
+ * `images` optionally conditions the generation on reference images, each
+ * `{ mimeType, data }` with `data` as raw bytes.
  */
-export async function generateImage({ prompt, model }) {
+export async function generateImage({ prompt, model, images = [] }) {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('GOOGLE_API_KEY is not set');
   const budget = maxAttempts();
@@ -114,7 +124,7 @@ export async function generateImage({ prompt, model }) {
 
   for (;;) {
     await waitTurn();
-    const { image, retry, seconds, reason } = await attempt({ apiKey, model, prompt });
+    const { image, retry, seconds, reason } = await attempt({ apiKey, model, prompt, images });
     if (image) return image;
 
     if (retry === 'rateLimit') {

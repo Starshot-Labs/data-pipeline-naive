@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Edit Results · Placement Data Creator</title>
+	</head>
+	<body>
+		<div id="app">
+			<aside id="sidebar">
+				<h1>Edit Results</h1>
+				<p class="hint">
+					Output of <code>pipeline/test-edit.mjs</code>: the anchor
+					normalized into TRELLIS's cube, the mask region derived for
+					it, and the one edited GLB VoxHammer returns.
+				</p>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Sample</span>
+						<button id="reloadRuns" class="ghost">Rescan</button>
+					</div>
+					<label class="field">
+						<select id="runSelect"></select>
+					</label>
+					<p id="runHint" class="hint"></p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Layers</span>
+						<button id="showAll" class="ghost">All</button>
+					</div>
+					<div class="row">
+						<button id="toggleInput" class="seg">Input</button>
+						<button id="toggleMask" class="seg">Mask</button>
+						<button id="toggleResult" class="seg">Result</button>
+					</div>
+					<p class="hint">
+						<kbd>1</kbd>–<kbd>3</kbd> toggle a layer,
+						<kbd>0</kbd> show all. The edit comes back in the cube it
+						was sent in, so input and result overlay directly.
+					</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>View</span></div>
+					<div class="row">
+						<button id="toggleGhost" class="seg active">
+							Ghost <kbd>G</kbd>
+						</button>
+						<button id="toggleTextured" class="seg">
+							Textured
+						</button>
+					</div>
+					<div class="row">
+						<button id="toggleBox" class="seg">LLM box</button>
+						<button id="frameView" class="seg">
+							Frame <kbd>F</kbd>
+						</button>
+					</div>
+					<p class="hint">
+						Ghost makes the input see-through, which is the only way
+						to read a mask sitting behind the anchor's near wall.
+						<em>LLM box</em> is the region as answered, before the
+						anchor was carved out of it.
+					</p>
+				</section>
+
+				<p class="hint">
+					<a href="/placement.html">← Placement</a> &nbsp;
+					<a href="/pipeline.html">Pipeline →</a>
+				</p>
+				<p id="status" class="status"></p>
+			</aside>
+
+			<main id="stage">
+				<div id="viewport"></div>
+				<div id="selInfo" class="badge">Pick a sample</div>
+			</main>
+
+			<aside id="inspector">
+				<section class="panel">
+					<div class="panel-title"><span>Placement</span></div>
+					<p id="placement" class="placement"></p>
+					<div id="numbers" class="bbox"></div>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>Mask reasoning</span></div>
+					<p
+						id="reasoning"
+						class="placement"
+						style="color: var(--muted)"
+					></p>
+				</section>
+
+				<div id="cards"></div>
+			</aside>
+		</div>
+		<script type="module" src="/src/edit-viewer.ts"></script>
+	</body>
+</html>

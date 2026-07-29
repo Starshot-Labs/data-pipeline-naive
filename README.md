@@ -265,7 +265,7 @@ since re-issuing it buys the same verdict.
    than through OpenRouter, because the settings that decide whether an image is any use to
    stage 3 live in `imageConfig` — square framing at 512², the size Trellis reconstructs
    from — and a compatibility layer has nowhere to put them.
-3. **Mesh** (`trellis.mjs`) — the batched Trellis 2 farm. Stage the images with `POST
+3. **Mesh** (`trellis-farm.mjs`) — the batched Trellis 2 farm. Stage the images with `POST
 /upload`, start **one** campaign for every object with `POST /run?mode=finish`, poll
    `GET /report` until it turns `200`, then pull the GLBs. Every object in a campaign
    generates simultaneously across the farm's pools, so nothing is sliced up on this side.
@@ -436,7 +436,23 @@ in one would take the other's endpoint down with it.
 The commands live in `modal/ops.mjs` and run under Node, reusing `pipeline/glb.mjs` and
 `pipeline/voxelize.mjs` unchanged — those grids decide what the placement model sees, and a
 Python reimplementation could shift them in ways no test would catch. `modal/scene_ops.py` is
-the thin wrapper that mounts the volumes, reloads before reads and commits after writes.
+the thin wrapper that mounts the volumes and decides when each command syncs them.
+
+**Syncing is kept off the per-sample path**, because that is where it would be paid tens of
+thousands of times. A Modal volume is a snapshot: a container sees another's writes only after
+a `reload()`, and its own become visible only after a `commit()`. Both cost around a third of
+a second, and a reload grows with the file count of the entire volume. The commands called
+once a run — staging the images, listing what is published — reload up front, where that is
+free at the rate they run. Voxelize and bake are called once a **sample**, and the meshes they
+read stop changing when stage 3 ends, so reloading before each call re-syncs a snapshot that
+is already correct. They reload only when an input turns up missing, which is the one symptom
+a snapshot older than the write actually has, so a container warmer than the write pays for
+the gap once rather than on every call. Baking's commit is coalesced for the same reason: a
+commit costs three quarters of a second before it moves a byte, and nothing reads a posed mesh
+until stage 7, so one commit carries every bake of the last `COMMIT_EVERY_S` (15) seconds.
+Anything another party is waiting on still pushes before replying — the meshes `collect` hands
+to the placement stage, and the metadata.json that marks a sample finished. A reload never
+runs with work outstanding, since pulling over the top of an uncommitted write can discard it.
 
 Knobs: `SCENE_BASE_URL` (the deployed endpoint), `SCENE_REQUEST_TIMEOUT_S` (`900`), and on
 the service side `SCENE_WORK_PREFIX` (`datasets/raw/stage1-work`) and `SCENE_PUBLISH_PREFIX`
@@ -450,5 +466,6 @@ arrangement comes entirely from the files, which is the point of looking.
 
 The meshes are read out of the sample's own folder when they are there and off the scene
 volume when they are not, and each object's reference image is shown beside its description.
-#   d a t a - p i p e l i n e  
+#   d a t a - p i p e l i n e 
+ 
  

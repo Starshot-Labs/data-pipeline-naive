@@ -15,6 +15,11 @@
     "meshes": "node pipeline/build-meshes.mjs",
     "generate": "node pipeline/build.mjs",
     "pipeline": "node pipeline/run.mjs",
+    "test-placement": "node pipeline/test-placement.mjs",
+    "test-generate": "node pipeline/test-generate.mjs",
+    "test-place": "node pipeline/test-place.mjs",
+    "test-edit": "node pipeline/test-edit.mjs",
+    "deploy-voxhammer": "modal deploy modal/voxhammer_app.py",
     "upload": "node pipeline/upload.mjs",
     "deploy": "modal deploy modal/scene_ops.py"
   },

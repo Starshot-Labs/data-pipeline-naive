@@ -138,6 +138,24 @@ export function sceneTriangles(glb) {
   return new Float64Array(out);
 }
 
+/** The same flat triangle list with `trs` applied to every vertex. */
+export function transformTriangles(triangles, { position, rotation, scale }) {
+  const matrix = new Matrix4().compose(
+    new Vector3().fromArray(position),
+    new Quaternion().fromArray(rotation),
+    new Vector3().fromArray(scale),
+  );
+  const out = new Float64Array(triangles.length);
+  const vertex = new Vector3();
+  for (let i = 0; i < triangles.length; i += 3) {
+    vertex.set(triangles[i], triangles[i + 1], triangles[i + 2]).applyMatrix4(matrix);
+    out[i] = vertex.x;
+    out[i + 1] = vertex.y;
+    out[i + 2] = vertex.z;
+  }
+  return out;
+}
+
 /**
  * Drop `alphaMode: BLEND` from solid meshes. Bakers tag a material BLEND whenever its
  * texture atlas carries an alpha channel — which it always does, for the padding around

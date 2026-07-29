@@ -18,9 +18,12 @@ generated-phrasing-test/
 dataset/
 test-2/
 out/
+placement-results/
+edit-results/
 
 .env
 
 .trellis-campaign.json
 .trellis-stage/
+.voxhammer-*.log
 __pycache__/

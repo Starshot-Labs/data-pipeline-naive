@@ -16,7 +16,7 @@ export async function chat(body) {
     const response = await fetch(ENDPOINT, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ reasoning: { effort: 'medium' }, ...body }),
     });
     if (response.ok) return response.json();
 

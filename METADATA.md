@@ -10,7 +10,11 @@ One file per sample, covering the whole pipeline. Replaces `spec.json` and
 	"created_at": "2026-07-28T00:40:50.607Z",
 	"context": "space station module",
 	"phrasing": "anchor",
-	"placement": "leaning against the bottom right side of the server rack",
+	"placement": [
+		"leaning against the bottom right side of the server rack",
+		"version two",
+		"version three"
+	],
 
 	"anchor": {
 		"name": "server rack",

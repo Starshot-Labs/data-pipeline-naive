@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { proposeSamples, planRequests, CONTEXTS } from './generate.mjs';
 import { ANCHOR_VIEW, randomView, imagePrompt, renderImage } from './images.mjs';
-import { generateMeshes } from './trellis.mjs';
+import { generateMeshes } from './trellis-farm.mjs';
 import { mapLimit, retry, widthOf } from './limit.mjs';
 import * as meta from './metadata.mjs';
 

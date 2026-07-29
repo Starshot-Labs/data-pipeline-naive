@@ -35,7 +35,7 @@ const SCHEMA = {
   additionalProperties: false,
 };
 
-function describe(heading, { name, grid, slices }) {
+export function describe(heading, { name, grid, slices }) {
   const [dx, dy, dz] = grid.dims;
   const lines = [`${heading} — "${name}"`, `grid ${dx} x ${dy} x ${dz}  (x, y, z)`];
   for (let y = dy - 1; y >= 0; ) {

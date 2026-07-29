@@ -33,6 +33,11 @@ const PUBLISH = process.env.SCENE_PUBLISH_PREFIX ?? 'datasets/raw/stage1';
 
 const IMAGE_EXT = /\.(png|jpe?g|webp)$/i;
 
+// Exit code for an input that is not on the volume, which is the one failure a caller can act
+// on: it means their snapshot predates the write, and a reload fixes it. `modal/scene_ops.py`
+// reloads and retries once on this code, so the two have to agree.
+export const MISSING_INPUT = 17;
+
 const workDir = (sample) => path.join(SCENE, WORK, sample);
 const publishDir = (sample) => path.join(SCENE, PUBLISH, sample);
 const round = (v) => Number(v.toFixed(6));
@@ -314,6 +319,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     process.stdout.write(JSON.stringify(await COMMANDS[command](request)));
   } catch (err) {
     process.stderr.write(err.stack ?? String(err));
-    process.exit(1);
+    process.exit(err.code === 'ENOENT' ? MISSING_INPUT : 1);
   }
 }
