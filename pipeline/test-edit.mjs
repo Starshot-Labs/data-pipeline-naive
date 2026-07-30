@@ -11,11 +11,18 @@
 // 64³ occupancy and the phrase, returns one broad box covering wherever the object might
 // generate, and the anchor's own voxels are subtracted from it.
 //
-//   local, this file          on the service (modal/voxhammer.py)
-//   1 · normalize the anchor  3 · render 5 RGB views + the 2D mask by depth comparison
-//   2 · box → mask mesh       4 · inpaint the chosen view (FLUX.1-Fill-dev)
-//                             5 · 150-view render, DINOv2 features, voxels, voxels_delete
-//                             6 · invert and re-denoise, decode to GLB
+// VoxHammer's own inpaint is skipped: it runs FLUX on text alone, so it never sees the
+// object being placed and invents one from the phrase. Instead the anchor view comes back
+// here, nano-banana inserts the actual object photo into it, and that edited view is what
+// the service conditions on — the one change to the method, made at the seam it already has.
+//
+//   local, this file             on the service (modal/voxhammer_app.py)
+//   1 · normalize the anchor
+//   2 · box → mask mesh
+//                        /render  3 · 5 RGB views + 2D mask, pick the most-visible view
+//   4 · nano-banana inserts the object photo into that view
+//                        /edit    5 · 150-view render, DINOv2 features, voxels, voxels_delete
+//                                 6 · invert and re-denoise, decode to GLB
 //
 //   node pipeline/test-edit.mjs                 every sample in placement-set/
 //   node pipeline/test-edit.mjs sample-4 ...    specific samples
@@ -34,10 +41,11 @@ import { parseGLB, serializeGLB, sceneTriangles, bakeTransform, transformTriangl
 import { toSlices } from './voxelize.mjs';
 import { renderView } from './render.mjs';
 import { GRID, unitCube, lattice, requestBox, buildMask } from './mask.mjs';
+import { generateImage } from './nano-banana.mjs';
 import { mapLimit, retry, widthOf } from './limit.mjs';
 import { writeAtomic } from './metadata.mjs';
 import { listSamples, readSample, nameOf } from './samples.mjs';
-import { editSample, health } from './voxhammer.mjs';
+import { renderViews, editSample, health } from './voxhammer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENV_FILE = path.join(ROOT, '.env');
@@ -53,6 +61,7 @@ const FORCE = args.includes('--force');
 // soup and a 192³ sampling grid at once, and half a dozen of those exhaust the heap.
 const WIDTH = Number(flag('concurrency', widthOf('EDIT_CONCURRENCY', 2)));
 const MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-3.1-pro-preview';
+const IMAGE_MODEL = process.env.IMAGE_MODEL ?? 'gemini-3.1-flash-image-preview';
 
 const MASK_FILE = 'mask.json';
 const EDIT_FILE = 'edit.json';
@@ -61,6 +70,29 @@ const round = (v) => Number(v.toFixed(6));
 const rounded = (arr) => arr.map(round);
 const writeJson = (file, value) => writeAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
+
+const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+const mimeOf = (file) => MIME[path.extname(file).toLowerCase()] ?? 'image/png';
+
+/**
+ * The one instruction that replaces FLUX. It gets three images — the anchor view, the
+ * object's photo, and the 2D mask — so unlike a text-only inpaint it is told exactly which
+ * object to place and where. Everything else in the view must stay put, because the service
+ * compares this against the untouched render to decide what actually changed.
+ */
+function insertionPrompt(phrase, objectName) {
+  return [
+    `Image 1 is a rendered view of a 3D scene. Image 2 is a photo of a ${objectName}.`,
+    `Image 3 is a mask whose white region marks where the ${objectName} belongs.`,
+    `Produce an edited copy of image 1 that is identical everywhere EXCEPT that the ${objectName}`,
+    `from image 2 now appears there, placed as "${phrase}".`,
+    `Put it over the white region of image 3, at a realistic size, matching image 1's camera`,
+    `angle, perspective, lighting and shadows, and keep the ${objectName}'s exact shape,`,
+    'material and colour from image 2.',
+    'Do not move, recolour or redraw anything else, and keep the same framing and plain',
+    'background as image 1. Output only the edited image.',
+  ].join(' ');
+}
 
 /** Steps 1-2: the two meshes VoxHammer takes, both in its cube, plus a look at them. */
 async function buildInputs(id) {
@@ -131,22 +163,50 @@ async function buildInputs(id) {
   return { out, phrase, imageFile, mask: record };
 }
 
-/** Steps 3-6, all of which need a GPU, so all of which happen on the service. */
-async function runEdit(id, { out, phrase, mask }) {
+/** Steps 3-6: render the view, insert the object into it, then edit on the service. */
+async function runEdit(id, { out, phrase, imageFile, mask }) {
   const say = (message) => console.log(`  [${id}] ${message}`);
   if (!FORCE && fs.existsSync(path.join(out, EDIT_FILE))) {
     say('already edited — use --force to redo');
     return;
   }
+  const images = path.join(out, 'images');
+  fs.mkdirSync(images, { recursive: true });
 
-  const result = await editSample({
+  // 3 · the anchor view the object will be inserted into, and its 2D mask
+  const view = await renderViews({
     id,
     model: fs.readFileSync(path.join(out, 'model.glb')),
     mask: fs.readFileSync(path.join(out, 'mask.glb')),
-    prompt: phrase,
     log: (message) => say(`    ${message}`),
   });
+  writeAtomic(path.join(images, '2d_render.png'), view.render);
+  writeAtomic(path.join(images, '2d_mask.png'), view.mask);
+  say(`3 · view ${view.view}`);
 
+  // 4 · nano-banana inserts the object photo into that view. Reused if a prior run made it,
+  // since it is the one billed-per-call step on this side.
+  const editPath = path.join(images, '2d_edit.png');
+  let editImage;
+  if (!FORCE && fs.existsSync(editPath)) {
+    editImage = fs.readFileSync(editPath);
+    say('4 · edit image (reused)');
+  } else {
+    editImage = await retry(() => generateImage({
+      prompt: insertionPrompt(phrase, nameOf(imageFile)),
+      model: IMAGE_MODEL,
+      images: [
+        { mimeType: 'image/png', data: view.render },
+        { mimeType: mimeOf(imageFile), data: fs.readFileSync(path.join(out, 'source.png')) },
+        { mimeType: 'image/png', data: view.mask },
+      ],
+    }));
+    writeAtomic(editPath, editImage);
+    say('4 · edit image');
+  }
+
+  // 5-6 · invert and re-denoise on the service, conditioned on the inserted-object view
+  const result = await editSample({ jobId: view.jobId, edit: editImage, log: (message) => say(`    ${message}`) });
   for (const [name, bytes] of Object.entries(result.files)) {
     const file = path.join(out, name);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -162,7 +222,9 @@ async function runEdit(id, { out, phrase, mask }) {
   writeJson(path.join(out, EDIT_FILE), {
     id,
     placement: phrase,
+    image_model: IMAGE_MODEL,
     mask_cells: mask.mask.cells,
+    view: view.view,
     result: { mesh: 'output.glb', preview: 'result-view.png', triangles: edited.length / 9 },
     ...result.record,
   });
