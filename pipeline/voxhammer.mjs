@@ -12,7 +12,9 @@ const baseUrl = () => process.env.VOXHAMMER_BASE_URL ?? DEFAULT_BASE_URL;
 const pollMs = () => Number(process.env.VOXHAMMER_POLL_S ?? 15) * 1000;
 const pollTimeoutMs = () => Number(process.env.VOXHAMMER_TIMEOUT_S ?? 7200) * 1000;
 
-const SPAWN_TIMEOUT_MS = 120_000;
+// The anchor meshes run 17-26 MB each, so this deadline covers an upload, not a handshake:
+// several posted at once share the uplink and every one of them finishes late.
+const SPAWN_TIMEOUT_MS = 600_000;
 const POLL_REQUEST_TIMEOUT_MS = 30_000;
 const FILE_TIMEOUT_MS = 300_000;
 

@@ -37,6 +37,7 @@ POST /edit spawns and returns a job id, /jobs/{id} reports the step it is on, an
 artifacts come off the volume one file at a time.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -422,20 +423,30 @@ def web():
         digest = hashlib.sha256(model_bytes + mask_bytes + prompt.encode()).hexdigest()[:10]
         job_id = f"vh-{re.sub(r'[^a-z0-9-]+', '-', sample.lower()) or 'job'}-{digest}"
 
-        uploads = Path(JOBS) / job_id / "inputs"
-        uploads.mkdir(parents=True, exist_ok=True)
-        (uploads / "model.glb").write_bytes(model_bytes)
-        (uploads / "mask.glb").write_bytes(mask_bytes)
-        jobs_volume.commit()
+        # Admission is all blocking work — two volume writes, a commit that covers whatever
+        # the GPU workers are writing at the same time, and two RPCs. Eight requests share
+        # this container's event loop, so running any of it inline stalls every other upload
+        # in flight and a batch posted together walks past the client's spawn deadline.
+        def write_uploads() -> None:
+            uploads = Path(JOBS) / job_id / "inputs"
+            uploads.mkdir(parents=True, exist_ok=True)
+            (uploads / "model.glb").write_bytes(model_bytes)
+            (uploads / "mask.glb").write_bytes(mask_bytes)
 
-        jobs[job_id] = {
-            "status": "pending",
-            "stage": "queued",
-            "sample": sample,
-            "prompt": prompt,
-            "created_at": time.time(),
-        }
-        edit.spawn(job_id, prompt)
+        await asyncio.to_thread(write_uploads)
+        # Committed before the spawn, not after: the worker mounts the volume as it starts.
+        await jobs_volume.commit.aio()
+        await jobs.put.aio(
+            job_id,
+            {
+                "status": "pending",
+                "stage": "queued",
+                "sample": sample,
+                "prompt": prompt,
+                "created_at": time.time(),
+            },
+        )
+        await edit.spawn.aio(job_id, prompt)
         return {"job_id": job_id, "sample": sample}
 
     @api.get("/jobs/{job_id}")
