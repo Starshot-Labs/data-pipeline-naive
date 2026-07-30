@@ -32,11 +32,13 @@ export async function chat(body) {
   }
 }
 
-/** Structured-output call: returns the parsed JSON payload plus what it cost. */
-export async function chatJSON({ model, system, user, name, schema, temperature }) {
+/** Structured-output call: returns the parsed JSON payload plus what it cost. `reasoning`
+ *  is OpenRouter's unified thinking knob and is omitted entirely when not asked for. */
+export async function chatJSON({ model, system, user, name, schema, temperature, reasoning }) {
   const body = await chat({
     model,
     ...(temperature === undefined ? {} : { temperature }),
+    ...(reasoning ? { reasoning } : {}),
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user },

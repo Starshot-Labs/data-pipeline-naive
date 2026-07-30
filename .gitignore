@@ -11,6 +11,10 @@ models/*
 dataset/*
 !dataset/.gitkeep
 
+# objaverse seed pool, built by pipeline/objaverse-pool.mjs
+pool/
+.tmp-*/
+
 # pipeline output
 generated/
 generated-1/
@@ -18,6 +22,7 @@ generated-phrasing-test/
 dataset/
 test-2/
 out/
+placement-logs/
 
 .env
 

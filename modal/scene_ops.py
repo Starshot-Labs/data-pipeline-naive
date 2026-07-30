@@ -57,8 +57,8 @@ PUBLISH_PREFIX = "datasets/raw/stage1"
 
 # What each command touches, which is what decides when to reload and when to commit.
 READS_FARM = {"assets", "collect"}
-READS_SCENE = {"stage", "voxelize", "bake", "published"}
-WRITES_SCENE = {"collect", "bake", "publish"}
+READS_SCENE = {"stage", "fetch", "voxelize", "refine", "pose", "bake", "drape", "published"}
+WRITES_SCENE = {"collect", "fetch", "bake", "drape", "publish"}
 # Staging is the one thing that writes the farm's side. It has to be committed before the
 # campaign starts, or `/run` walks the input volume and finds nothing there.
 WRITES_FARM_IN = {"stage"}

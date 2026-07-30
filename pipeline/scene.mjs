@@ -141,11 +141,88 @@ export const assetCount = (runId) => call('assets', { run_id: runId }).then((r) 
  */
 export const collect = (runId, objects) => call('collect', { run_id: runId, objects });
 
-/** Occupancy grids for both of a sample's meshes: `objects` is `{ role, stem, resolution }`. */
-export const voxelize = (sample, objects) => call('voxelize', { sample, objects });
+/**
+ * Downloads and renders a sample's recorded Objaverse assets: `objects` is
+ * `[{ role, stem, uid, glb }]`. Volume-resident samples fetch through the service (or
+ * in-process on Modal, where `/scene` is mounted); passing `dir` fetches straight into
+ * that local folder instead, cached beside the repo, so a local corpus needs no volume.
+ */
+export async function fetchAssets(sample, objects, dir) {
+  if (dir) {
+    const cache = path.resolve(ROOT, process.env.FETCH_CACHE ?? '.objaverse-cache');
+    return (await import('./ops.mjs')).fetchInto(dir, objects, cache);
+  }
+  return call('fetch', { sample, objects });
+}
 
-/** Writes the posed meshes and their images into the published folder, and measures them. */
-export const bake = (sample, objects) => call('bake', { sample, objects });
+/**
+ * Solid-block decompositions for both of a sample's meshes: `objects` is
+ * `{ role, stem, resolution }`. A sample folder that already holds its meshes — a local
+ * corpus, rather than the usual volume-resident one — is voxelized in-process from those
+ * files, so testing against local assets needs no service and no volume at all.
+ */
+export async function voxelize(sample, objects, dir) {
+  const local = dir && objects.every(({ stem }) => fs.existsSync(path.join(dir, `${stem}.glb`)));
+  if (local) return (await import('./ops.mjs')).voxelizeDir(dir, objects);
+  return call('voxelize', { sample, objects });
+}
+
+/**
+ * Mesh-accurate refinement of a placement before it is baked: `payload` carries the same
+ * `objects` array bake takes plus the model's declared intent. Runs wherever the meshes
+ * are — but never on this thread. The solver is the one CPU-heavy step the pipeline would
+ * otherwise run in-process, and stage 5 is hundreds of samples wide, so the local and
+ * direct cases go through a worker pool while the remote case fans out across scene-ops
+ * containers like everything else.
+ */
+export async function refine(sample, payload, dir) {
+  const local = dir && payload.objects.every(({ stem }) => fs.existsSync(path.join(dir, `${stem}.glb`)));
+  if (local) return (await import('./physics-pool.mjs')).refine(dir, payload);
+  if (isDirect()) {
+    const { workDir } = await import('./ops.mjs');
+    return (await import('./physics-pool.mjs')).refine(workDir(sample), payload);
+  }
+  return call('refine', { sample, ...payload });
+}
+
+/**
+ * Soft-body placement for a drape-classified sample: solve, deform and bake in one step,
+ * because the intermediate is a whole vertex buffer. Runs off the main thread locally
+ * and on Modal for the same reason refine does; remote fans out across scene-ops.
+ */
+export async function drape(sample, payload, dir) {
+  const local = dir && payload.objects.every(({ stem }) => fs.existsSync(path.join(dir, `${stem}.glb`)));
+  if (local) return (await import('./physics-pool.mjs')).drape(dir, dir, payload);
+  if (isDirect()) {
+    const { workDir, publishDir } = await import('./ops.mjs');
+    return (await import('./physics-pool.mjs')).drape(workDir(sample), publishDir(sample), payload);
+  }
+  return call('drape', { sample, ...payload });
+}
+
+/**
+ * The baked placement TRS of both meshes, read back from the posed files — what a
+ * physics-only pass continues from. A local corpus answers from its `.posed.glb`
+ * siblings; a volume sample from its published GLBs.
+ */
+export async function pose(sample, objects, dir) {
+  const posed = (stem) => `${stem}.posed.glb`;
+  const local = dir && objects.every(({ stem }) => fs.existsSync(path.join(dir, posed(stem))));
+  if (local) return { transforms: (await import('./ops.mjs')).posedTransforms(dir, objects, posed) };
+  return call('pose', { sample, objects });
+}
+
+/**
+ * Writes the posed meshes and their images into the published folder, and measures them.
+ * A local corpus — the sample folder holding its own meshes — bakes into itself instead:
+ * each posed mesh lands as a `.posed.glb` sibling, the raw meshes stay untouched, and the
+ * sample can be re-placed as often as wanted.
+ */
+export async function bake(sample, objects, dir) {
+  const local = dir && objects.every(({ stem }) => fs.existsSync(path.join(dir, `${stem}.glb`)));
+  if (local) return (await import('./ops.mjs')).bakeDir(dir, dir, objects);
+  return call('bake', { sample, objects });
+}
 
 /**
  * The two small text files for many samples at once, written last so they mark each one

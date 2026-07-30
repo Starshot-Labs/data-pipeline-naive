@@ -352,22 +352,38 @@ A folder needs a `metadata.json` to be read at all, which is also what keeps thi
 the hand-placed exports in `dataset/`: it bakes in place, and baking over a human's
 arrangement would destroy the thing that made it worth keeping.
 
+When a sample's folder itself holds its meshes — a corpus copied down from the volume, say —
+stages 4-6 run against those files in-process instead of asking the scene service, so a
+local dataset places with no Modal in the loop. The bake writes each posed mesh as a
+`.posed.glb` sibling and leaves the raw one untouched, so re-placing is repeatable;
+`--force` re-places samples that are already marked placed:
+
+```bash
+node pipeline/run.mjs --dry --source=<folder> [sampleId ...]     # prompts only
+node pipeline/run.mjs --force --source=<folder> [sampleId ...]   # place for real
+```
+
 4. **Voxelize** (`voxelize.mjs`) — triangles are surface-sampled onto a 3×-subdivided
    grid, then a flood fill from the outside marks everything it cannot reach as interior.
    Closed volumes come out solid; open ones (a bathtub basin, the space under a table)
    stay hollow. The sub-grid is collapsed back down and a voxel only counts as occupied
    once more than 20% of its volume is solid, which drops the slivers left where a surface
-   just clips a corner. Each grid is centred on its own bounding box.
-5. **Place** (`place.mjs`) — both grids are printed as horizontal `#`/`.` slices and sent
-   to OpenRouter with the placement phrase. Runs of identical consecutive layers collapse
-   into one block headed `y=31..12`, which keeps prismatic shapes (walls, table legs)
-   cheap at high resolution. The prompt keeps its own `A`/`B` naming for the pair — `A` is
-   the anchor, `B` the placed object — and everything is expressed in **A-voxels**: A's
-   grid is the working frame, and the model returns
-    - `scale` — how many A-voxels one B-voxel becomes. B's absolute size is deliberately
-      undefined, exactly as it will be once both objects come out of Trellis.
-    - `yaw_degrees` — rotation about `+Y`.
-    - `center` — B's bounding-box centre in A-voxel coordinates.
+   just clips a corner. Each grid is centred on its own bounding box. The occupancy is then
+   decomposed into disjoint **maximal axis-aligned blocks**, extracted largest first so
+   every block is as big as the remaining volume allows — a solid prism is one block, and a
+   cube with a slice inset into it is three.
+5. **Place** (`place.mjs`) — each object goes to OpenRouter as its block list —
+   `(x0, y0, z0) to (x1, y1, z1)` per line, world units, in the object's own bbox-centred
+   frame — together with the placement phrase. The prompt keeps its own `A`/`B` naming for
+   the pair — `A` is the anchor, `B` the placed object — and the answer is expressed in
+   **A's frame**, which becomes the world frame once A is baked centred at the origin. The
+   model returns
+    - `scale` — the factor B's coordinates are multiplied by. B's absolute size is
+      deliberately undefined, exactly as it will be once both objects come out of Trellis.
+    - `yaw_degrees` / `pitch_degrees` / `roll_degrees` — a full 3D rotation, applied in
+      that order about B's own axes and its bounding-box centre. Most placements sit
+      upright with zero pitch and roll; leaning ones genuinely tilt.
+    - `center` — where B's bounding-box centre lands, in A's frame.
 6. **Bake** (`glb.mjs`, on the scene service) — each GLB's scene is re-parented under a
    single node named `placement` carrying the resolved transform, so both meshes are posed
    purely by their own contents. The anchor is written with its bbox centre at the origin.
@@ -380,12 +396,21 @@ which is the only one of the three that cannot be derived from the others, and w
 marks a sample placed. Sizes are measured from the transformed triangles rather than from a
 transformed bounding box, since those only agree when the yaw is a multiple of 90°.
 
-Knobs: `VOXEL_RES_ANCHOR` (default `64`), `VOXEL_RES_PLACED` (`32`), `OPENROUTER_MODEL`
-(`google/gemini-3.1-pro-preview`).
+Every placement writes a timestamped Markdown log into `placement-logs/`
+(`PLACEMENT_LOG_DIR`) the moment the model answers: the exact system and user prompt it saw
+in fenced blocks, its full answer, and the resolved transforms — a readable audit trail for
+every pose in the dataset.
 
-Resolution is the cost dial: prompt size grows with the cube of it, and organic shapes
-dedupe poorly. At `64`/`32` a wall costs ~700 characters and a lounge chair ~260k, so drop
-to `48` or `32` if you are running the whole dataset.
+Knobs: `VOXEL_RES_ANCHOR` (default `16`), `VOXEL_RES_PLACED` (`16`), `OPENROUTER_MODEL`
+(`google/gemini-3.1-pro-preview`), `PLACEMENT_LOG_DIR` (`./placement-logs`).
+
+Resolution is the cost dial, and it acts through the block count: prismatic shapes
+decompose into a handful of blocks at any resolution, while curved shells staircase into
+slivers that each cost a line. At `16` the whole 447-sample corpus averages ~40 blocks an
+object and ~4.5k characters a prompt (the worst sample is 14k); at `124` a single bathtub
+is ~4.4k blocks and ~260k characters. Contact precision moves with the same dial — one
+voxel spans 1/16th of an object's longest side — so raise it when placements have to land
+tighter than that.
 
 ### 7 · Publishing
 
@@ -446,9 +471,14 @@ the service side `SCENE_WORK_PREFIX` (`datasets/raw/stage1-work`) and `SCENE_PUB
 
 `npm run dev`, then open **http://localhost:5173/pipeline.html**. Pick a placed sample to
 load both posed GLBs into one scene. Nothing in the viewer transforms them — the
-arrangement comes entirely from the files, which is the point of looking.
+arrangement comes entirely from the files, which is the point of looking. **Place with
+LLM** re-runs stages 4-6 on the selected sample from the page (the server spawns the same
+CLI, so `OPENROUTER_API_KEY` comes from `.env` as usual); on a local corpus the result
+lands as `.posed.glb` copies, which the mesh route prefers, so the raw corpus survives and
+the button stays repeatable.
 
 The meshes are read out of the sample's own folder when they are there and off the scene
 volume when they are not, and each object's reference image is shown beside its description.
-#   d a t a - p i p e l i n e  
+#   d a t a - p i p e l i n e 
+ 
  

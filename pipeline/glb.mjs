@@ -66,7 +66,7 @@ function readComponent(view, at, componentType) {
   }
 }
 
-function readAccessor({ json, bin }, index) {
+export function readAccessor({ json, bin }, index) {
   const accessor = json.accessors[index];
   if (accessor.sparse) throw new Error('sparse accessors are not supported');
   if (accessor.bufferView === undefined) throw new Error('accessor without bufferView');
@@ -87,7 +87,7 @@ function readAccessor({ json, bin }, index) {
   return out;
 }
 
-function localMatrix(node) {
+export function localMatrix(node) {
   const m = new Matrix4();
   if (node.matrix) return m.fromArray(node.matrix);
   return m.compose(
@@ -172,4 +172,142 @@ export function bakeTransform(glb, { position, rotation, scale }) {
 export function isBaked({ json }) {
   const roots = json.scenes?.[json.scene ?? 0]?.nodes ?? [];
   return roots.length === 1 && json.nodes?.[roots[0]]?.name === PLACEMENT_NODE;
+}
+
+/**
+ * Rewrites every vertex of the default scene through `map`, a function over positions in
+ * the file's own scene frame — the same frame `sceneTriangles` speaks. This is how a
+ * soft-body result becomes a file: the drape deforms world positions, and writing them
+ * back through each node's inverse matrix keeps the glTF structure — nodes, materials,
+ * UVs, the works — exactly as it was, with only the geometry moved.
+ *
+ * Normals are recomputed from the deformed triangles (area-weighted, so they come out of
+ * the cross products already scaled by influence); tangents, if any, are left alone,
+ * which shades a normal map slightly wrong on heavily bent regions — acceptable against
+ * re-deriving a tangent basis. Buffers are rewritten in place at their original strides
+ * and offsets, so shared and interleaved layouts survive.
+ */
+export function deformGLB(glb, map) {
+  const json = structuredClone(glb.json);
+  const bin = Buffer.from(glb.bin);
+  const out = { json, bin };
+  const scene = json.scenes?.[json.scene ?? 0];
+  if (!scene) throw new Error('GLB has no scene');
+
+  const seen = new Map(); // accessor index → matrix it was deformed under
+  const write = (accessorIndex, values) => {
+    const accessor = json.accessors[accessorIndex];
+    const view = json.bufferViews[accessor.bufferView];
+    const stride = view.byteStride ?? 12;
+    const base = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
+    for (let i = 0; i < accessor.count; i++) {
+      for (let c = 0; c < 3; c++) bin.writeFloatLE(values[i * 3 + c], base + i * stride + c * 4);
+    }
+  };
+
+  const visit = (nodeIndex, parent) => {
+    const node = json.nodes[nodeIndex];
+    const world = parent.clone().multiply(localMatrix(node));
+    if (node.mesh !== undefined) deformMesh(out, node.mesh, world, map, seen, write);
+    for (const child of node.children ?? []) visit(child, world);
+  };
+  for (const root of scene.nodes ?? []) visit(root, new Matrix4());
+
+  return out;
+}
+
+function deformMesh(glb, meshIndex, world, map, seen, write) {
+  const { json } = glb;
+  const inverse = world.clone().invert();
+  const v = new Vector3();
+
+  for (const primitive of json.meshes[meshIndex].primitives) {
+    const positionIndex = primitive.attributes?.POSITION;
+    if (positionIndex === undefined) continue;
+    if (seen.has(positionIndex)) {
+      if (!seen.get(positionIndex).equals(world)) {
+        throw new Error('a POSITION accessor is shared across differently-posed nodes — cannot deform');
+      }
+      continue;
+    }
+    seen.set(positionIndex, world.clone());
+
+    const positions = readAccessor(glb, positionIndex);
+    const count = positions.length / 3;
+    const deformed = new Float64Array(positions.length);
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < count; i++) {
+      v.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]).applyMatrix4(world);
+      const p = map(v.x, v.y, v.z);
+      v.set(p[0], p[1], p[2]).applyMatrix4(inverse);
+      deformed[i * 3] = v.x;
+      deformed[i * 3 + 1] = v.y;
+      deformed[i * 3 + 2] = v.z;
+      for (let c = 0; c < 3; c++) {
+        const value = v.getComponent(c);
+        if (value < min[c]) min[c] = value;
+        if (value > max[c]) max[c] = value;
+      }
+    }
+    write(positionIndex, deformed);
+    json.accessors[positionIndex].min = min;
+    json.accessors[positionIndex].max = max;
+
+    const normalIndex = primitive.attributes?.NORMAL;
+    if (normalIndex !== undefined && !seen.has(normalIndex)) {
+      seen.set(normalIndex, world.clone());
+      write(normalIndex, recomputeNormals(glb, primitive, deformed));
+    }
+  }
+}
+
+/** Area-weighted vertex normals of a primitive's deformed geometry, in node-local space. */
+function recomputeNormals(glb, primitive, positions) {
+  const indices = primitive.indices !== undefined ? readAccessor(glb, primitive.indices) : null;
+  const count = indices ? indices.length : positions.length / 3;
+  const normals = new Float64Array(positions.length);
+
+  for (let i = 0; i + 2 < count; i += 3) {
+    const a = indices ? indices[i] : i;
+    const b = indices ? indices[i + 1] : i + 1;
+    const c = indices ? indices[i + 2] : i + 2;
+    const ux = positions[b * 3] - positions[a * 3];
+    const uy = positions[b * 3 + 1] - positions[a * 3 + 1];
+    const uz = positions[b * 3 + 2] - positions[a * 3 + 2];
+    const vx = positions[c * 3] - positions[a * 3];
+    const vy = positions[c * 3 + 1] - positions[a * 3 + 1];
+    const vz = positions[c * 3 + 2] - positions[a * 3 + 2];
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    for (const vertex of [a, b, c]) {
+      normals[vertex * 3] += nx;
+      normals[vertex * 3 + 1] += ny;
+      normals[vertex * 3 + 2] += nz;
+    }
+  }
+  for (let i = 0; i < normals.length; i += 3) {
+    const len = Math.hypot(normals[i], normals[i + 1], normals[i + 2]) || 1;
+    normals[i] /= len;
+    normals[i + 1] /= len;
+    normals[i + 2] /= len;
+  }
+  return normals;
+}
+
+/**
+ * The TRS a baked file carries, or null for a raw mesh. The inverse of `bakeTransform`:
+ * poses live in the files and nowhere else, so anything that wants to continue from the
+ * current arrangement — a physics-only pass, most notably — starts by reading it back.
+ */
+export function extractTransform({ json }) {
+  const roots = json.scenes?.[json.scene ?? 0]?.nodes ?? [];
+  const node = roots.length === 1 ? json.nodes?.[roots[0]] : null;
+  if (!node || node.name !== PLACEMENT_NODE) return null;
+  return {
+    position: node.translation ?? [0, 0, 0],
+    rotation: node.rotation ?? [0, 0, 0, 1],
+    scale: node.scale ?? [1, 1, 1],
+  };
 }

@@ -25,6 +25,71 @@
 						<select id="runSelect"></select>
 					</label>
 					<p id="runHint" class="hint"></p>
+					<label class="field">
+						<span>Model</span>
+						<input
+							id="modelSearch"
+							type="search"
+							placeholder="filter models…"
+						/>
+						<select id="modelSelect"></select>
+					</label>
+					<label class="field">
+						<span>Voxel resolution</span>
+						<input
+							id="resInput"
+							type="number"
+							min="4"
+							max="128"
+							value="16"
+						/>
+					</label>
+					<label class="field">
+						<span>Reasoning</span>
+						<select id="reasoningSelect">
+							<option value="">model default</option>
+							<option value="off">off</option>
+							<option value="low">low effort</option>
+							<option value="medium">medium effort</option>
+							<option value="high">high effort</option>
+						</select>
+					</label>
+					<label class="field">
+						<span>Contact</span>
+						<select id="contactSelect">
+							<option value="">model decides</option>
+							<option value="rest">rest (rigid settle)</option>
+							<option value="lean">lean</option>
+							<option value="attach">attach</option>
+							<option value="embed">embed</option>
+							<option value="drape">drape (soft body)</option>
+							<option value="none">none</option>
+						</select>
+					</label>
+					<div class="row">
+						<button id="placeRun" class="primary" disabled>
+							Place with LLM
+						</button>
+						<button id="physicsRun" class="seg" disabled>
+							Apply Physics
+						</button>
+					</div>
+					<div class="row">
+						<button id="fullRun" class="primary" disabled>
+							Full Place
+						</button>
+						<button id="resetRun" class="seg" disabled>
+							Reset
+						</button>
+					</div>
+					<p class="hint">
+						Place with LLM asks the model alone, physics off.
+						Apply Physics presses the pose currently on screen
+						into mesh contact — no model call. Full Place does
+						both. A local sample keeps its raw meshes and gains
+						posed copies, so all of them are repeatable.
+					</p>
+					<p id="placeLog" class="status"></p>
 				</section>
 
 				<section class="panel">
@@ -41,10 +106,30 @@
 						<button id="frameView" class="seg">
 							Frame <kbd>F</kbd>
 						</button>
+						<button id="toggleBlocks" class="seg">Blocks</button>
+						<button id="toggleVoxels" class="seg">Voxels</button>
+						<button id="toggleGhost" class="seg" disabled>
+							Ghost
+						</button>
 					</div>
+					<label class="field">
+						<span>Overlay opacity</span>
+						<input
+							id="blockOpacity"
+							type="range"
+							min="0"
+							max="100"
+							value="18"
+						/>
+					</label>
 					<p class="hint">
-						Both meshes carry their pose in the file, so nothing
-						here transforms them.
+						A posed pair is shown exactly as the files say. A raw
+						pair is parked side by side until something places it.
+						Blocks overlays the merged decomposition the placement
+						model reads; Voxels shows the raw occupancy it was
+						merged from. After Full Place or Apply Physics, Ghost
+						overlays a translucent copy of the placed object at
+						the pose the physics started from.
 					</p>
 				</section>
 

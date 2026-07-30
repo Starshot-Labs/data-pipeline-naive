@@ -10,7 +10,7 @@ const SAMPLES_PER_VOXEL = 2;
 const SUBDIVISION = 3;
 const MIN_FILL = 0.2;
 
-function bounds(triangles) {
+export function bounds(triangles) {
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < triangles.length; i += 3) {
@@ -23,7 +23,7 @@ function bounds(triangles) {
   return { min, max };
 }
 
-function rasterize(triangles, dims, voxelSize, gridMin) {
+export function rasterize(triangles, dims, voxelSize, gridMin) {
   const data = new Uint8Array(dims[0] * dims[1] * dims[2]);
   const mark = (x, y, z) => {
     const ix = Math.min(dims[0] - 1, Math.max(0, Math.floor((x - gridMin[0]) / voxelSize)));
@@ -54,7 +54,7 @@ function rasterize(triangles, dims, voxelSize, gridMin) {
   return data;
 }
 
-function floodOutside(data, dims) {
+export function floodOutside(data, dims) {
   const [dx, dy, dz] = dims;
   const outside = new Uint8Array(data.length);
   const stack = new Int32Array(data.length);
@@ -131,18 +131,140 @@ export function voxelize(triangles, resolution) {
   return { dims, voxelSize, origin, center, size, data: downsample(fine, fineDims, dims) };
 }
 
-/** One string per Y layer, indexed bottom-up. Each layer has `dz` rows of `dx` characters. */
-export function toSlices({ dims, data }) {
-  const [dx, dy, dz] = dims;
-  const slices = [];
-  for (let y = 0; y < dy; y++) {
-    const rows = [];
-    for (let z = 0; z < dz; z++) {
-      let row = '';
-      for (let x = 0; x < dx; x++) row += data[(y * dz + z) * dx + x] ? '#' : '.';
-      rows.push(row);
-    }
-    slices.push(rows.join('\n'));
+const ORDERS = [
+  [0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0],
+];
+const OTHERS = [[1, 2], [0, 2], [0, 1]];
+
+/** A max-heap of candidate boxes keyed by volume, small enough to live here. */
+class Heap {
+  items = [];
+  get size() { return this.items.length; }
+  peek() { return this.items[0]; }
+  push(item) {
+    const a = this.items;
+    let i = a.push(item) - 1;
+    for (let p; i > 0 && a[(p = (i - 1) >> 1)].volume < a[i].volume; i = p) [a[p], a[i]] = [a[i], a[p]];
   }
-  return slices;
+  pop() {
+    const a = this.items;
+    const top = a[0];
+    const last = a.pop();
+    if (a.length) {
+      a[0] = last;
+      for (let i = 0; ; ) {
+        let largest = i;
+        for (const c of [2 * i + 1, 2 * i + 2]) if (c < a.length && a[c].volume > a[largest].volume) largest = c;
+        if (largest === i) break;
+        [a[largest], a[i]] = [a[i], a[largest]];
+        i = largest;
+      }
+    }
+    return top;
+  }
+}
+
+/**
+ * Decomposes the solid voxels into disjoint axis-aligned blocks, extracted largest first so
+ * every block is as big as the remaining volume allows: a solid cube is one block, a cube
+ * with a thick slice inset into it is three. Extracting in seed order instead would let a
+ * box grown from a narrow region leak through a constriction and fragment the larger volume
+ * behind it.
+ *
+ * Candidates grow greedily from region corners (voxels with nothing free on their three
+ * negative sides) along all six axis orders, the largest of the six winning. The heap is
+ * lazy: a popped candidate is regrown against current coverage and emitted only if it still
+ * beats what remains, so nothing is recomputed until the moment it might actually win.
+ * Emitting a block can only create new corners on its three positive faces, which is what
+ * keeps the candidate set complete; the lexicographic-minimum sweep is the backstop that
+ * guarantees a corner always exists while anything is uncovered.
+ *
+ * Blocks come back as `[x0, y0, z0, x1, y1, z1]` in the object's own bbox-centred frame
+ * (world units), sorted largest first, rounded just past voxel precision so adjacent block
+ * faces stay distinct without dragging float noise into the prompt.
+ */
+export function toBlocks({ dims, data, voxelSize, origin }) {
+  const [dx, dy, dz] = dims;
+  const covered = new Uint8Array(data.length);
+  const free = (x, y, z) =>
+    x >= 0 && y >= 0 && z >= 0 && x < dx && y < dy && z < dz &&
+    data[(y * dz + z) * dx + x] === 1 && !covered[(y * dz + z) * dx + x];
+  const isCorner = (x, y, z) =>
+    free(x, y, z) && !free(x - 1, y, z) && !free(x, y - 1, z) && !free(x, y, z - 1);
+
+  // Whether the whole face of `extent` at `min`, one step further along `axis`, is free.
+  const growable = (min, extent, axis) => {
+    const edge = min[axis] + extent[axis];
+    if (edge >= dims[axis]) return false;
+    const [u, v] = OTHERS[axis];
+    const p = [0, 0, 0];
+    p[axis] = edge;
+    for (let i = 0; i < extent[u]; i++) {
+      p[u] = min[u] + i;
+      for (let j = 0; j < extent[v]; j++) {
+        p[v] = min[v] + j;
+        if (!free(p[0], p[1], p[2])) return false;
+      }
+    }
+    return true;
+  };
+
+  const grow = (x, y, z) => {
+    const min = [x, y, z];
+    let best = null;
+    for (const order of ORDERS) {
+      const extent = [1, 1, 1];
+      for (const axis of order) while (growable(min, extent, axis)) extent[axis]++;
+      const volume = extent[0] * extent[1] * extent[2];
+      if (!best || volume > best.volume) best = { min, extent, volume };
+    }
+    return best;
+  };
+
+  const heap = new Heap();
+  const seed = (x, y, z) => { if (isCorner(x, y, z)) heap.push(grow(x, y, z)); };
+  const sweep = () => {
+    for (let y = 0; y < dy; y++)
+      for (let z = 0; z < dz; z++)
+        for (let x = 0; x < dx; x++) seed(x, y, z);
+  };
+  sweep();
+
+  let remaining = 0;
+  for (const cell of data) remaining += cell;
+
+  const blocks = [];
+  while (remaining > 0) {
+    if (!heap.size) { sweep(); continue; }
+
+    const popped = heap.pop();
+    if (!free(...popped.min)) continue;
+    const box = grow(...popped.min);
+    if (heap.size && box.volume < heap.peek().volume) {
+      heap.push(box);
+      continue;
+    }
+
+    const [x, y, z] = box.min;
+    const [ex, ey, ez] = box.extent;
+    for (let by = y; by < y + ey; by++)
+      for (let bz = z; bz < z + ez; bz++)
+        for (let bx = x; bx < x + ex; bx++) covered[(by * dz + bz) * dx + bx] = 1;
+    remaining -= box.volume;
+    blocks.push(box);
+
+    // Coverage only turns cells from free to covered, so the only voxels whose corner
+    // status can change are the ones just past the block's three positive faces.
+    for (let by = y; by < y + ey; by++) for (let bz = z; bz < z + ez; bz++) seed(x + ex, by, bz);
+    for (let bx = x; bx < x + ex; bx++) for (let bz = z; bz < z + ez; bz++) seed(bx, y + ey, bz);
+    for (let bx = x; bx < x + ex; bx++) for (let by = y; by < y + ey; by++) seed(bx, by, z + ez);
+  }
+
+  const decimals = Math.max(0, Math.ceil(-Math.log10(voxelSize)) + 1);
+  const world = (c, i) => Number((origin[c] + i * voxelSize).toFixed(decimals));
+  blocks.sort((a, b) => b.volume - a.volume);
+  return blocks.map(({ min, extent }) => [
+    world(0, min[0]), world(1, min[1]), world(2, min[2]),
+    world(0, min[0] + extent[0]), world(1, min[1] + extent[1]), world(2, min[2] + extent[2]),
+  ]);
 }

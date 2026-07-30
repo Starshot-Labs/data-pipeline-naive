@@ -1,6 +1,7 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
@@ -53,7 +54,15 @@ app.get('/mesh/:id/:name', async (req, res) => {
   const name = path.basename(req.params.name);
 
   const local = path.join(GENERATED_DIR, id, name);
-  if (fs.existsSync(local)) return res.type('model/gltf-binary').sendFile(local);
+  // A locally re-placed sample keeps its raw mesh and gains a `.posed.glb` sibling; the
+  // posed one is the sample's current answer, so it is the one served — unless the caller
+  // asks for the original with `?raw=1`, which is how the viewer's Reset shows the pair
+  // as it was before any placement.
+  const posed = local.replace(/\.glb$/i, '.posed.glb');
+  const file = !('raw' in req.query) && /\.glb$/i.test(name) && fs.existsSync(posed) ? posed : local;
+  // dotfiles: a GENERATED_DIR living under a dot-folder is legitimate, and sendFile's
+  // default of ignoring any dotted path segment would 404 every mesh inside one.
+  if (fs.existsSync(file)) return res.type('model/gltf-binary').sendFile(file, { dotfiles: 'allow' });
 
   const target = `${SCENE_BASE_URL}/file/${encodeURIComponent(id)}/${encodeURIComponent(name)}`;
   try {
@@ -64,6 +73,113 @@ app.get('/mesh/:id/:name', async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: String(err) });
   }
+});
+
+// The models the placement picker offers: OpenRouter's public catalog, trimmed to models
+// that can actually answer a structured-output placement call, cached in memory because the
+// catalog is a couple hundred KB and changes rarely. The default mirrors place.mjs.
+let modelCatalog = { at: 0, models: [] };
+
+app.get('/api/placement-models', async (_req, res) => {
+  try {
+    if (Date.now() - modelCatalog.at > 60 * 60 * 1000) {
+      const upstream = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(30_000) });
+      if (!upstream.ok) throw new Error(`openrouter models: HTTP ${upstream.status}`);
+      const { data } = await upstream.json();
+      const models = (data ?? [])
+        .filter((model) => model.supported_parameters?.includes('structured_outputs'))
+        .map((model) => ({ id: model.id, name: model.name, context_length: model.context_length }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+      modelCatalog = { at: Date.now(), models };
+    }
+    res.json({
+      models: modelCatalog.models,
+      default: process.env.OPENROUTER_MODEL ?? 'google/gemini-3.1-pro-preview',
+    });
+  } catch (err) {
+    res.status(502).json({ error: String(err?.message ?? err) });
+  }
+});
+
+// One placement child per sample at a time — a second click while one runs is answered 409
+// rather than racing it over the same files.
+const placing = new Set();
+
+// Placement from the viewer: runs the placement stages on one sample by spawning the CLI,
+// which loads .env itself and owns all the failure handling — the server never needs an
+// API key in its own environment. Three modes, one per button: `place` is the LLM alone
+// (physics forced off), `physics` re-runs just the solver on the sample's baked pose, and
+// `full` is both. `--force` because clicking a placing button *is* the request to re-place.
+app.post('/api/place', (req, res) => {
+  const id = path.basename(String(req.body?.id ?? ''));
+  if (!id || !fs.existsSync(path.join(GENERATED_DIR, id))) {
+    return res.status(404).json({ error: `no sample folder named "${id}"` });
+  }
+  if (placing.has(id)) return res.status(409).json({ error: `already placing ${id}` });
+  placing.add(id);
+
+  const mode = ['place', 'physics', 'full'].includes(req.body?.mode) ? req.body.mode : 'full';
+
+  // The picker's choices ride in as env vars: the CLI's env-file load never overrides
+  // variables that already exist, so these win over .env for just this child.
+  const model = typeof req.body?.model === 'string' && /^[~\w.:/-]{1,128}$/.test(req.body.model)
+    ? req.body.model
+    : null;
+  const resolution = clampResolution(req.body?.resolution);
+  const reasoning = ['off', 'low', 'medium', 'high'].includes(req.body?.reasoning) ? req.body.reasoning : null;
+  const contact = ['rest', 'lean', 'attach', 'embed', 'drape', 'none'].includes(req.body?.contact)
+    ? req.body.contact
+    : null;
+
+  const env = { ...process.env };
+  if (model) env.OPENROUTER_MODEL = model;
+  if (resolution) {
+    env.VOXEL_RES_ANCHOR = String(resolution);
+    env.VOXEL_RES_PLACED = String(resolution);
+  }
+  if (reasoning) env.OPENROUTER_REASONING = reasoning;
+  if (contact) env.PLACEMENT_CONTACT = contact;
+  // Explicit both ways, so the buttons mean what they say regardless of what .env says.
+  if (mode !== 'physics') env.PLACEMENT_PHYSICS = mode === 'full' ? 'on' : 'off';
+  // Ask the CLI for its one structured line: the pose physics started from, which the
+  // viewer overlays as a translucent ghost of the model's answer.
+  env.PLACEMENT_GHOST = '1';
+
+  const child = spawn(
+    process.execPath,
+    [
+      path.join(ROOT, 'pipeline', 'run.mjs'),
+      mode === 'physics' ? '--physics-only' : '--force',
+      `--source=${GENERATED_DIR}`,
+      id,
+    ],
+    { cwd: ROOT, env },
+  );
+
+  let log = '';
+  child.stdout.on('data', (chunk) => { log += chunk; });
+  child.stderr.on('data', (chunk) => { log += chunk; });
+
+  let done = false;
+  const finish = (status, body) => {
+    if (done) return;
+    done = true;
+    placing.delete(id);
+    res.status(status).json(body);
+  };
+  child.on('error', (err) => finish(500, { error: String(err) }));
+  child.on('close', (code) => {
+    // The child's structured line, parsed before the log is trimmed for display: the
+    // placed object's transform from before the physics pass, for the viewer's ghost.
+    let ghost;
+    try {
+      const line = [...log.matchAll(/^GHOST (\{.*\})\s*$/gm)].at(-1);
+      if (line) ghost = JSON.parse(line[1]);
+    } catch {
+      ghost = undefined;
+    }
+    finish(200, { id, ok: code === 0, log: log.slice(-4000), ...(ghost ? { ghost } : {}) });
+  });
 });
 
 const ROLES = ['anchor', 'placed'];
@@ -86,6 +202,58 @@ function runMeshes(dir, id, metadata) {
     .filter((file) => /\.glb$/i.test(file))
     .sort((a, b) => (a === anchor ? -1 : b === anchor ? 1 : a.localeCompare(b)));
 }
+
+/** A voxel resolution the pipeline can reasonably take, or null for "use the default". */
+function clampResolution(value) {
+  const n = Math.round(Number(value));
+  return Number.isFinite(n) && n >= 4 && n <= 128 ? n : null;
+}
+
+// The voxel geometry the placement model reads: both meshes voxelized on demand at the
+// pipeline's own resolutions (or the caller's `?res=` override), answered as the maximal
+// blocks the prompt carries plus the raw occupancy they were merged from. Only a local
+// corpus can answer this — a sample whose meshes live on the volume voxelizes there.
+app.get('/api/blocks/:id', async (req, res) => {
+  const id = path.basename(req.params.id);
+  const dir = path.join(GENERATED_DIR, id);
+  try {
+    const meshes = fs.existsSync(dir) ? runMeshes(dir, id, readMetadata(dir)) : [];
+    if (meshes.length !== 2 || !meshes.every((mesh) => fs.existsSync(path.join(dir, mesh)))) {
+      return res.status(404).json({ error: 'this sample\'s raw meshes are not in its local folder' });
+    }
+
+    const [{ parseGLB, sceneTriangles }, { voxelize, toBlocks }] = await Promise.all([
+      import('../pipeline/glb.mjs'),
+      import('../pipeline/voxelize.mjs'),
+    ]);
+
+    const override = clampResolution(req.query.res);
+    const grids = {};
+    for (const [i, role] of ROLES.entries()) {
+      const resolution = override ?? Number(process.env[i === 0 ? 'VOXEL_RES_ANCHOR' : 'VOXEL_RES_PLACED'] ?? 16);
+      const grid = voxelize(sceneTriangles(parseGLB(fs.readFileSync(path.join(dir, meshes[i])))), resolution);
+
+      const [dx, dy, dz] = grid.dims;
+      const voxels = [];
+      for (let y = 0; y < dy; y++)
+        for (let z = 0; z < dz; z++)
+          for (let x = 0; x < dx; x++) if (grid.data[(y * dz + z) * dx + x]) voxels.push([x, y, z]);
+
+      grids[role] = {
+        dims: grid.dims,
+        voxelSize: grid.voxelSize,
+        origin: grid.origin,
+        center: grid.center,
+        size: grid.size,
+        blocks: toBlocks(grid),
+        voxels,
+      };
+    }
+    res.json(grids);
+  } catch (err) {
+    res.status(500).json({ error: String(err?.message ?? err) });
+  }
+});
 
 // Everything in generated/ with a pair of meshes to look at. A sample carries `combined_size`
 // once pipeline/run.mjs has posed it, and describes itself from there. A spec.json folder is

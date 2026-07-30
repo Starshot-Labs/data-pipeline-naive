@@ -21,8 +21,11 @@ import { pathToFileURL } from 'node:url';
 import sharp from 'sharp';
 import { decompress } from 'fzstd';
 import { Vector3, Quaternion, Matrix4 } from 'three';
-import { parseGLB, serializeGLB, sceneTriangles, bakeTransform, forceOpaqueMaterials } from './glb.mjs';
-import { voxelize, toSlices } from './voxelize.mjs';
+import { parseGLB, serializeGLB, sceneTriangles, bakeTransform, deformGLB, extractTransform, forceOpaqueMaterials, isBaked } from './glb.mjs';
+import { voxelize, toBlocks } from './voxelize.mjs';
+import { refineDir } from './physics.mjs';
+import { buildDrape } from './cloth.mjs';
+import { renderGLB } from './render.mjs';
 import { writeAtomic } from './metadata.mjs';
 
 const FARM_OUT = process.env.FARM_OUT_DIR ?? '/farm-out';
@@ -30,11 +33,13 @@ const FARM_IN = process.env.FARM_IN_DIR ?? '/farm-in';
 const SCENE = process.env.SCENE_DIR ?? '/scene';
 const WORK = process.env.SCENE_WORK_PREFIX ?? 'datasets/raw/stage1-work';
 const PUBLISH = process.env.SCENE_PUBLISH_PREFIX ?? 'datasets/raw/stage1';
+// Objaverse GLBs and their renders, cached by uid — assets shared across samples land once.
+const CACHE = process.env.SCENE_CACHE_PREFIX ?? 'datasets/raw/objaverse-cache';
 
 const IMAGE_EXT = /\.(png|jpe?g|webp)$/i;
 
-const workDir = (sample) => path.join(SCENE, WORK, sample);
-const publishDir = (sample) => path.join(SCENE, PUBLISH, sample);
+export const workDir = (sample) => path.join(SCENE, WORK, sample);
+export const publishDir = (sample) => path.join(SCENE, PUBLISH, sample);
 const round = (v) => Number(v.toFixed(6));
 const rounded = (values) => values.map(round);
 
@@ -127,7 +132,192 @@ function measure(glb, trs) {
   return { min, max };
 }
 
+/**
+ * Grid + solid-block decomposition for the meshes in `dir`: `objects` is
+ * `{ role, stem, resolution }`. Exported apart from the command so a pipeline whose sample
+ * folders already hold their meshes can voxelize them in-process — same code, same grids,
+ * no volume in the loop.
+ */
+export function voxelizeDir(dir, objects) {
+  const grids = {};
+  for (const { role, stem, resolution } of objects) {
+    const grid = voxelize(sceneTriangles(readGlb(path.join(dir, `${stem}.glb`))), resolution);
+    grids[role] = {
+      dims: grid.dims,
+      voxelSize: grid.voxelSize,
+      origin: grid.origin,
+      center: grid.center,
+      size: grid.size,
+      blocks: toBlocks(grid),
+    };
+  }
+  return grids;
+}
+
+/**
+ * The placement TRS each of a sample's posed meshes carries, read back from the files —
+ * the GLB is the one place a pose lives, so a pass that continues from the current
+ * arrangement starts here. `name` maps a stem to its posed file: published folders keep
+ * the plain name, a local corpus poses into `.posed.glb` siblings.
+ */
+export function posedTransforms(dir, objects, name = (stem) => `${stem}.glb`) {
+  const transforms = {};
+  for (const { role, stem } of objects) {
+    const trs = extractTransform(readGlb(path.join(dir, name(stem))));
+    if (!trs) throw new Error(`${name(stem)} carries no placement — place the sample first`);
+    transforms[role] = trs;
+  }
+  return transforms;
+}
+
+/**
+ * Reads each raw mesh from `source`, bakes its transform in, and writes the posed copy and
+ * its reference image into `destination`. Exported apart from the command for local corpora,
+ * which bake with `source` and `destination` the same folder: there the posed copy is
+ * written as a `.posed.glb` sibling and the raw mesh survives untouched, so the sample can
+ * be re-placed any number of times. A raw file already carrying a placement (a folder baked
+ * by the old in-place scheme) is refused rather than given a second transform.
+ */
+export function bakeDir(source, destination, objects) {
+  fs.mkdirSync(destination, { recursive: true });
+
+  const boxes = {};
+  const sizes = {};
+  for (const { role, stem, trs } of objects) {
+    const glb = readGlb(path.join(source, `${stem}.glb`));
+    if (isBaked(glb)) {
+      throw new Error(`${stem}.glb already carries a placement — re-placing needs the raw mesh back`);
+    }
+    boxes[role] = measure(glb, trs);
+    const name = source === destination ? `${stem}.posed.glb` : `${stem}.glb`;
+    writeAtomic(path.join(destination, name), serializeGLB(bakeTransform(glb, trs)));
+    sizes[role] = rounded(boxes[role].max.map((value, c) => value - boxes[role].min[c]));
+
+    const image = findByStem(source, stem, IMAGE_EXT);
+    if (image && source !== destination) {
+      writeAtomic(path.join(destination, image), fs.readFileSync(path.join(source, image)));
+    }
+  }
+
+  const all = Object.values(boxes);
+  return {
+    sizes,
+    combined_size: rounded(
+      [0, 1, 2].map((c) => Math.max(...all.map((b) => b.max[c])) - Math.min(...all.map((b) => b.min[c]))),
+    ),
+  };
+}
+
+/**
+ * The soft-body counterpart of `bakeDir`: reads both raw meshes, drapes the placed one
+ * over the anchor (pipeline/cloth.mjs), and writes the result in one step — the
+ * intermediate is a whole vertex buffer, which is not worth a second trip. The deformed
+ * positions are written back into the placed GLB in its own local frame under the same
+ * placement TRS, so the file behaves exactly like a rigidly-baked one to everything
+ * downstream. A drape that refuses falls back to the rigid bake of the model's answer,
+ * with the report saying so.
+ */
+export function drapeDir(source, destination, objects, options = {}) {
+  fs.mkdirSync(destination, { recursive: true });
+  const byRole = Object.fromEntries(objects.map((object) => [object.role, object]));
+  const glbs = {};
+  for (const role of ['anchor', 'placed']) {
+    glbs[role] = readGlb(path.join(source, `${byRole[role].stem}.glb`));
+    if (isBaked(glbs[role])) {
+      throw new Error(`${byRole[role].stem}.glb already carries a placement — re-placing needs the raw mesh back`);
+    }
+  }
+
+  const { map, report } = buildDrape({
+    anchorTriangles: sceneTriangles(glbs.anchor),
+    placedTriangles: sceneTriangles(glbs.placed),
+    anchor: byRole.anchor.trs,
+    placed: byRole.placed.trs,
+    options,
+  });
+  if (map) glbs.placed = deformGLB(glbs.placed, map);
+
+  const boxes = {};
+  const sizes = {};
+  for (const { role, stem, trs } of objects) {
+    boxes[role] = measure(glbs[role], trs);
+    sizes[role] = rounded(boxes[role].max.map((value, c) => value - boxes[role].min[c]));
+    const name = source === destination ? `${stem}.posed.glb` : `${stem}.glb`;
+    writeAtomic(path.join(destination, name), serializeGLB(bakeTransform(glbs[role], trs)));
+
+    const image = findByStem(source, stem, IMAGE_EXT);
+    if (image && source !== destination) {
+      writeAtomic(path.join(destination, image), fs.readFileSync(path.join(source, image)));
+    }
+  }
+
+  const all = Object.values(boxes);
+  return {
+    sizes,
+    combined_size: rounded(
+      [0, 1, 2].map((c) => Math.max(...all.map((b) => b.max[c])) - Math.min(...all.map((b) => b.min[c]))),
+    ),
+    report,
+  };
+}
+
+const HF_GLB = (glbPath) => `https://huggingface.co/datasets/allenai/objaverse/resolve/main/${glbPath}`;
+
+async function downloadTo(file, url) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch(url, { redirect: 'follow' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      writeAtomic(file, Buffer.from(await response.arrayBuffer()));
+      return;
+    } catch (err) {
+      if (attempt >= 3) throw new Error(`${url}: ${err.message}`);
+      await new Promise((resolve) => setTimeout(resolve, 2 ** attempt * 1000 * (0.5 + Math.random())));
+    }
+  }
+}
+
+/**
+ * Downloads each object's Objaverse GLB and renders its reference image into
+ * `destination`, both through a per-uid cache: an asset seeded into fifty samples is
+ * downloaded and rendered once and copied fifty times. Exported apart from the command so
+ * a local corpus can fetch straight into its own folder with a cache beside it — same
+ * code, no volume in the loop. Failures come back per object rather than throwing, so one
+ * bad asset (a Draco mesh, a dead file) does not block the sample's other half.
+ */
+export async function fetchInto(destination, objects, cacheDir) {
+  fs.mkdirSync(destination, { recursive: true });
+  fs.mkdirSync(cacheDir, { recursive: true });
+
+  const fetched = {};
+  const errors = [];
+  for (const { role, stem, uid, glb } of objects) {
+    try {
+      const cachedGlb = path.join(cacheDir, `${uid}.glb`);
+      if (!fs.existsSync(cachedGlb)) await downloadTo(cachedGlb, HF_GLB(glb));
+
+      const cachedPng = path.join(cacheDir, `${uid}.png`);
+      if (!fs.existsSync(cachedPng)) writeAtomic(cachedPng, await renderGLB(readGlb(cachedGlb)));
+
+      writeAtomic(path.join(destination, `${stem}.glb`), fs.readFileSync(cachedGlb));
+      writeAtomic(path.join(destination, `${stem}.png`), fs.readFileSync(cachedPng));
+      fetched[role] = { mesh: `${stem}.glb`, image: `${stem}.png` };
+    } catch (err) {
+      errors.push({ role, uid, error: err.message });
+    }
+  }
+  return { fetched, errors };
+}
+
 export const COMMANDS = {
+  /**
+   * A sample's recorded Objaverse assets, downloaded from Hugging Face onto the volume and
+   * rendered, cache-first. `objects` is `[{ role, stem, uid, glb }]`.
+   */
+  fetch({ sample, objects }) {
+    return fetchInto(workDir(sample), objects, path.join(SCENE, CACHE));
+  },
+
   /**
    * Puts reference images where the farm's dispatcher looks: one directory per lane under
    * `uploads/`, each file named after its key so the object id the farm derives maps straight
@@ -217,22 +407,24 @@ export const COMMANDS = {
     return { collected, missing, images };
   },
 
-  /** The occupancy grids the placement model reasons over. */
+  /** The solid-block decompositions the placement model reasons over. */
   voxelize({ sample, objects }) {
-    const dir = workDir(sample);
-    const grids = {};
-    for (const { role, stem, resolution } of objects) {
-      const grid = voxelize(sceneTriangles(readGlb(path.join(dir, `${stem}.glb`))), resolution);
-      grids[role] = {
-        dims: grid.dims,
-        voxelSize: grid.voxelSize,
-        origin: grid.origin,
-        center: grid.center,
-        size: grid.size,
-        slices: toSlices(grid),
-      };
-    }
-    return grids;
+    return voxelizeDir(workDir(sample), objects);
+  },
+
+  /** Mesh-accurate placement refinement, between place and bake — see pipeline/physics.mjs. */
+  refine({ sample, objects, intent, options }) {
+    return refineDir(workDir(sample), { objects, intent, options });
+  },
+
+  /** The baked placement transforms of a published sample, for a physics-only re-pass. */
+  pose({ sample, objects }) {
+    return { transforms: posedTransforms(publishDir(sample), objects) };
+  },
+
+  /** Soft-body placement: drape, deform and bake in one step — see pipeline/cloth.mjs. */
+  drape({ sample, objects, options }) {
+    return drapeDir(workDir(sample), publishDir(sample), objects, options);
   },
 
   /**
@@ -243,29 +435,7 @@ export const COMMANDS = {
    * have stacked on the first and a changed mind meant re-meshing on the farm.
    */
   bake({ sample, objects }) {
-    const source = workDir(sample);
-    const destination = publishDir(sample);
-    fs.mkdirSync(destination, { recursive: true });
-
-    const boxes = {};
-    const sizes = {};
-    for (const { role, stem, trs } of objects) {
-      const glb = readGlb(path.join(source, `${stem}.glb`));
-      boxes[role] = measure(glb, trs);
-      writeAtomic(path.join(destination, `${stem}.glb`), serializeGLB(bakeTransform(glb, trs)));
-      sizes[role] = rounded(boxes[role].max.map((value, c) => value - boxes[role].min[c]));
-
-      const image = findByStem(source, stem, IMAGE_EXT);
-      if (image) writeAtomic(path.join(destination, image), fs.readFileSync(path.join(source, image)));
-    }
-
-    const all = Object.values(boxes);
-    return {
-      sizes,
-      combined_size: rounded(
-        [0, 1, 2].map((c) => Math.max(...all.map((b) => b.max[c])) - Math.min(...all.map((b) => b.min[c]))),
-      ),
-    };
+    return bakeDir(workDir(sample), publishDir(sample), objects);
   },
 
   /**

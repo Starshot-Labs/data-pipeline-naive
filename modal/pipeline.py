@@ -1,12 +1,14 @@
-"""dc-pipeline — the whole dataset pipeline, run on Modal.
+"""dc-pipeline — the whole retrieval dataset pipeline, run on Modal end to end.
 
-    modal run modal/pipeline.py --pairs 500            watch it
-    modal run --detach modal/pipeline.py --pairs 500    let it outlive your terminal
+    modal run modal/pipeline.py --samples 500             watch it
+    modal run --detach modal/pipeline.py --samples 50000   let it outlive your terminal
 
-One container runs all seven stages, with `generated/` living on the scene volume instead of
-a laptop. Nothing crosses a home connection: the images are made here and staged onto the
-farm's input volume from here, the meshes never leave Modal at all, and the only traffic is
-the model calls each stage makes.
+One container runs every stage, with the seed pool and `generated/` living on the scene
+volume instead of a laptop: the Objaverse pool builds (or fills its gaps) on first use,
+scenes are generated against it, the recorded assets are downloaded from Hugging Face and
+rendered straight onto the volume, and placement, physics and publishing follow. Nothing
+crosses a home connection — the only outside traffic is model calls and the Hugging Face
+downloads, which land directly on the volume.
 
 Stages run as separate `node` invocations on purpose. Modal volumes are snapshots — a
 container has to `commit()` for its writes to be visible elsewhere and `reload()` to see
@@ -47,6 +49,8 @@ scene = modal.Volume.from_name("trellis-scene-vol-v2")
 # Where `generated/` lives — the small half of every sample, alongside the work and published
 # prefixes the rest of the pipeline writes.
 STAGING_PREFIX = "datasets/raw/staging"
+# The Objaverse seed pool — captions, tags and download caches — shared across runs.
+POOL_PREFIX = "datasets/raw/pool"
 # Long enough that a stage never dies mid-flight; a stalled campaign has its own limits.
 TIMEOUT_S = 24 * 60 * 60
 # A stage can run for half an hour, and a container that died before its boundary would lose
@@ -89,15 +93,13 @@ def committing_every(seconds: int):
 def node_env() -> dict[str, str]:
     generated = f"/scene/{STAGING_PREFIX}"
     return {
-        **os.environ,  # carries OPENROUTER_API_KEY and GOOGLE_API_KEY in from the secret
+        **os.environ,  # carries OPENROUTER_API_KEY in from the secret
         "GENERATED_DIR": generated,
+        "POOL_DIR": f"/scene/{POOL_PREFIX}",
         "SCENE_DIR": "/scene",
-        # `/scene` is mounted here, so the operations that only touch it run in-process.
-        # Anything reading a farm volume still goes to dc-scene-ops, which can reload.
+        # `/scene` is mounted here, so every operation — fetch, voxelize, refine, bake —
+        # runs in-process against it rather than round-tripping through dc-scene-ops.
         "SCENE_OPS_DIRECT": "1",
-        # On the volume rather than in the container, so an interrupted campaign is still
-        # attachable after the container that started it is gone.
-        "TRELLIS_STATE": f"{generated}/.trellis-campaign.json",
     }
 
 
@@ -114,15 +116,19 @@ def run_stage(label: str, script: str, *args: str) -> int:
     secrets=[modal.Secret.from_name("dc-pipeline-env")],
     timeout=TIMEOUT_S,
 )
-def run(pairs: int = 0) -> dict:
+def run(samples: int = 0) -> dict:
     Path(f"/scene/{STAGING_PREFIX}").mkdir(parents=True, exist_ok=True)
+    Path(f"/scene/{POOL_PREFIX}").mkdir(parents=True, exist_ok=True)
     sync()
 
     stages = [
-        ("1-2 · invent and render", "build-images.mjs", [f"--pairs={pairs}"]),
-        ("3 · meshes", "build-meshes.mjs", []),
-        ("4-6 · place", "run.mjs", []),
-        ("7 · publish", "upload.mjs", []),
+        # The pool build skips everything already on the volume, so after its first run
+        # this stage is a few seconds of checking.
+        ("0 · objaverse pool", "objaverse-pool.mjs", []),
+        ("1 · scenes", "generate-scenes.mjs", [f"--samples={samples}"]),
+        ("2 · fetch + render", "fetch-assets.mjs", []),
+        ("3-5 · place", "run.mjs", []),
+        ("6 · publish", "upload.mjs", []),
     ]
 
     # A non-zero stage is logged rather than fatal: every one of them skips work already done,
@@ -134,9 +140,9 @@ def run(pairs: int = 0) -> dict:
                 failed.append(label)
                 print(f"   ✗ {label} reported a failure", flush=True)
 
-    return {"pairs": pairs, "failed_stages": failed}
+    return {"samples": samples, "failed_stages": failed}
 
 
 @app.local_entrypoint()
-def main(pairs: int = 0):
-    print(run.remote(pairs))
+def main(samples: int = 0):
+    print(run.remote(samples))

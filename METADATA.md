@@ -30,7 +30,22 @@ One file per sample, covering the whole pipeline. Replaces `spec.json` and
 		"size": [0.30122, 0.21988, 0.2204]
 	},
 
-	"combined_size": [0.81244, 1.602104, 0.5512]
+	"combined_size": [0.81244, 1.602104, 0.5512],
+
+	"intent": {
+		"contact": "lean",
+		"direction": [0, 0, -1],
+		"embed_fraction": 0
+	},
+
+	"physics": {
+		"contact": "lean",
+		"moved": 0.021553,
+		"rotated_degrees": 2.4,
+		"gap_before": 0.0192,
+		"gap_after": -0.0011,
+		"flags": []
+	}
 }
 ```
 
@@ -60,11 +75,37 @@ meshes never come down — `mesh` names the file as it exists on the volume.
     - `textured` — anchor `false`, placed `true`
     - `size` — `[x, y, z]` of the baked mesh
 - `combined_size` — `[x, y, z]` union box of the two posed meshes
+- `intent` — the placement model's classification of its own answer (`contact` —
+  `rest`, `lean`, `attach`, `embed`, `drape` or `none` — plus `contact_direction` as
+  `direction` and `embed_fraction`), recorded so a physics-only re-pass
+  (`run.mjs --physics-only`, the viewer's "Apply Physics") knows what the placement
+  meant without another model call. A `drape` bakes deformed vertices rather than a new
+  transform; the placement TRS in the GLB stays the model's.
+- `physics` — what the mesh-contact refinement between place and bake did:
+    - `contact` — the placement model's own classification (`rest`, `lean`, `attach`,
+      `embed`, `none`), which picked the solver's behaviour
+    - `moved` / `rotated_degrees` — how far the pass moved the placed object, in world
+      units and degrees
+    - `gap_before` / `gap_after` — closest approach to the anchor before and after
+      (negative means touching with the intended sliver of overlap, or an embed)
+    - `flags` — empty when the solve was clean; `deep_penetration`, `no_contact`,
+      `drifted`, `settled_away` (the surface would have slid the body away from where
+      the phrase put it — or toppled it outright — so the straight drop was kept
+      instead), `nested` (wedged or
+      tucked somewhere tighter than the field resolves — the pose stands, lifted at most
+      a few cells to its least-penetrating height), `dropped_far`,
+      `no_rest`, `lean_no_side`, `lean_incomplete`, `no_direction`, `drape_failed` (the
+      cloth pass refused and the rigid bake of the model's answer stands) mean the pass
+      reverted, held something back, or wants review; `error` (with no numbers) means
+      it crashed and the model's transforms were baked untouched
 
 Keys appear as stages complete: stage 1 writes everything except `image`, `mesh`,
 `textured`, `size` and `combined_size`; stage 2 adds `image`; stage 3 adds `mesh` and
-`textured`; stage 6 adds the sizes. Omit a key that is not ready rather than writing
-`null` — absence is how the pipeline knows what work is left.
+`textured`; stage 6 adds the sizes, `intent` and `physics`. Omit a key that is not ready
+rather than writing `null` — absence is how the pipeline knows what work is left.
+`physics` is absent when `PLACEMENT_PHYSICS=off` — deliberately deleted then, because a
+report left by an earlier pass would describe transforms that are no longer the baked
+ones.
 
 **Dropped entirely, do not carry over:** `voxels`, `llm`, `model`, `usage`, `reasoning`,
 `transforms`, `ground_truth`, `export_frame`, `source`, `files`, `view`, every
