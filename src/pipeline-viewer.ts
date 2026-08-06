@@ -59,6 +59,8 @@ function el<T extends HTMLElement>(id: string): T {
 
 const dom = {
   viewport: el<HTMLDivElement>('viewport'),
+  corpusSelect: el<HTMLSelectElement>('corpusSelect'),
+  splitView: el<HTMLButtonElement>('splitView'),
   runSelect: el<HTMLSelectElement>('runSelect'),
   reloadRuns: el<HTMLButtonElement>('reloadRuns'),
   runHint: el<HTMLParagraphElement>('runHint'),
@@ -82,6 +84,9 @@ const dom = {
   placement: el<HTMLParagraphElement>('placement'),
   numbers: el<HTMLDivElement>('numbers'),
   descriptions: el<HTMLDivElement>('descriptions'),
+  llmSelect: el<HTMLSelectElement>('llmSelect'),
+  llmHint: el<HTMLParagraphElement>('llmHint'),
+  llmLog: el<HTMLDivElement>('llmLog'),
 };
 
 const buttons: Record<Layer, HTMLButtonElement> = {
@@ -125,6 +130,16 @@ const loader = new GLTFLoader();
 const layers: Partial<Record<Layer, THREE.Object3D>> = {};
 const visible: Record<Layer, boolean> = { anchor: true, placed: true };
 let runs: Run[] = [];
+
+/** Which corpus — which `generated*` folder — the viewer reads. '' is the server default. */
+let corpus = '';
+
+/** The corpus as a query-string tail for the routes that take one. */
+const corpusQuery = () => (corpus ? `&corpus=${encodeURIComponent(corpus)}` : '');
+
+/** Where a sample's plain files (metadata, images) are served from. */
+const sampleBase = (id: string) =>
+  corpus ? `/file/${encodeURIComponent(corpus)}/${encodeURIComponent(id)}` : `/generated/${encodeURIComponent(id)}`;
 
 const overlays: Partial<Record<Layer, THREE.Group>> = {};
 const gridsCache = new Map<string, Record<Layer, Grid>>();
@@ -214,7 +229,7 @@ async function showGhost(trs: GhostTRS): Promise<void> {
     const mesh = runs.find((run) => run.id === id)?.meshes[1];
     if (!mesh) return;
     const loaded = await loader.loadAsync(
-      `/mesh/${encodeURIComponent(id)}/${encodeURIComponent(mesh)}?raw=1&v=${Date.now()}`,
+      `/mesh/${encodeURIComponent(id)}/${encodeURIComponent(mesh)}?raw=1&v=${Date.now()}${corpusQuery()}`,
     );
     // Raw files carry no placement node — the pose goes straight onto the root.
     loaded.scene.position.fromArray(trs.position);
@@ -392,11 +407,11 @@ async function showOverlay(id: string): Promise<void> {
   const mode = overlayMode;
   if (!mode) return;
 
-  const key = `${id}@${currentRes()}`;
+  const key = `${corpus}/${id}@${currentRes()}`;
   let grids = gridsCache.get(key);
   if (!grids) {
     setStatus('Computing voxel geometry…', 'busy');
-    const response = await fetch(`/api/blocks/${encodeURIComponent(id)}?res=${currentRes()}`);
+    const response = await fetch(`/api/blocks/${encodeURIComponent(id)}?res=${currentRes()}${corpusQuery()}`);
     const body = (await response.json()) as (Record<Layer, Grid> & { error?: string }) | { error: string };
     if (!response.ok || !('anchor' in body)) throw new Error(body.error ?? `HTTP ${response.status}`);
     grids = body;
@@ -495,6 +510,108 @@ function renderInfo(sample: Sample, base: string): void {
   }
 }
 
+/** One placement's full model conversation, as `/api/placement-logs` parses it out of the
+ *  audit log: the exact system and user prompt the model saw, its answer, and what the
+ *  physics pass did. `current` marks the log whose baked transforms are the pose on screen. */
+interface PlacementLog {
+  file: string;
+  stamp: string | null;
+  model: string | null;
+  tokens: string | null;
+  cost: string | null;
+  placement: string;
+  system: string;
+  user: string;
+  answer: string;
+  physics: string;
+  transforms: unknown;
+  current?: boolean;
+}
+
+let llmLogs: PlacementLog[] = [];
+
+function clearLlmPanel(hint = ''): void {
+  llmLogs = [];
+  dom.llmSelect.innerHTML = '';
+  dom.llmLog.textContent = '';
+  dom.llmHint.textContent = hint;
+}
+
+function renderLlmLog(log: PlacementLog): void {
+  dom.llmLog.textContent = '';
+
+  const meta = document.createElement('p');
+  meta.className = 'llm-meta';
+  meta.textContent = [
+    log.model ?? 'physics-only pass — no model call',
+    log.tokens,
+    log.cost,
+    log.current === false ? 'not the pose on screen' : null,
+  ].filter(Boolean).join('\n');
+  dom.llmLog.appendChild(meta);
+
+  const section = (title: string, text: string, open = false) => {
+    if (!text) return;
+    const details = document.createElement('details');
+    details.open = open;
+    const summary = document.createElement('summary');
+    summary.textContent = title;
+    const pre = document.createElement('pre');
+    pre.textContent = text;
+    details.append(summary, pre);
+    dom.llmLog.appendChild(details);
+  };
+
+  section('Answer', log.answer, true);
+  section('User prompt (LLM input)', log.user);
+  section('System prompt', log.system);
+  section('Physics', log.physics);
+  if (log.transforms) section('Baked transforms', JSON.stringify(log.transforms, null, 2));
+}
+
+/** Fills the LLM panel with every placement log this sample has, newest first, preselecting
+ *  the one whose transforms match the currently baked pose. */
+async function loadLlmLogs(id: string): Promise<void> {
+  clearLlmPanel('Loading placement logs…');
+  try {
+    const response = await fetch(
+      `/api/placement-logs/${encodeURIComponent(id)}?${corpusQuery().slice(1)}`,
+      { cache: 'no-store' },
+    );
+    const body = (await response.json()) as { logs?: PlacementLog[]; error?: string };
+    if (!response.ok || !body.logs) throw new Error(body.error ?? `HTTP ${response.status}`);
+
+    llmLogs = body.logs;
+    if (!llmLogs.length) {
+      dom.llmHint.textContent = 'No placement logs for this sample — nothing has placed it from this machine.';
+      return;
+    }
+
+    for (const [index, log] of llmLogs.entries()) {
+      const option = document.createElement('option');
+      option.value = String(index);
+      const when = log.stamp ? new Date(log.stamp).toLocaleString() : log.file;
+      option.textContent = `${log.current ? '● ' : ''}${when} — ${log.model ?? 'physics only'}`;
+      dom.llmSelect.appendChild(option);
+    }
+
+    const matched = llmLogs.findIndex((log) => log.current);
+    const chosen = Math.max(matched, 0);
+    dom.llmSelect.value = String(chosen);
+    renderLlmLog(llmLogs[chosen]);
+    dom.llmHint.textContent = matched >= 0
+      ? ''
+      : 'No log matches the baked pose (placed elsewhere or restored) — showing the newest.';
+  } catch (err) {
+    clearLlmPanel(`Logs unavailable: ${(err as Error).message}`);
+  }
+}
+
+dom.llmSelect.addEventListener('change', () => {
+  const log = llmLogs[Number(dom.llmSelect.value)];
+  if (log) renderLlmLog(log);
+});
+
 const UUID_SUFFIX = /_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 /** `coffee_mug_2b4bef1f-….glb` → `coffee mug`, the only name a spec.json folder gives up. */
@@ -526,14 +643,14 @@ async function loadRun(id: string): Promise<void> {
 
   clearLayers();
   setStatus(`Loading ${id}…`, 'busy');
-  const base = `/generated/${encodeURIComponent(id)}`;
+  const base = sampleBase(id);
 
   try {
     // Served out of the sample folder when its meshes are there, off the scene volume when they
     // are not. Either way, whatever pose a mesh has is already inside the file. The cache-buster
     // matters after "Place with LLM": the same URL must yield the freshly posed mesh. `raw`
     // bypasses the posed copies — that is the Reset view.
-    const bust = `v=${Date.now()}${showRaw ? '&raw=1' : ''}`;
+    const bust = `v=${Date.now()}${showRaw ? '&raw=1' : ''}${corpusQuery()}`;
     const loaded = await Promise.all(
       run.meshes.map((mesh) => loader.loadAsync(`/mesh/${encodeURIComponent(id)}/${encodeURIComponent(mesh)}?${bust}`)),
     );
@@ -555,6 +672,7 @@ async function loadRun(id: string): Promise<void> {
     } else {
       renderFiles(run);
     }
+    void loadLlmLogs(id);
 
     frame();
     setStatus(
@@ -574,7 +692,7 @@ async function loadRun(id: string): Promise<void> {
 
 async function loadRuns(): Promise<void> {
   try {
-    const response = await fetch('/api/runs');
+    const response = await fetch(`/api/runs?${corpusQuery().slice(1)}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     runs = ((await response.json()) as { runs: Run[] }).runs ?? [];
 
@@ -594,6 +712,35 @@ async function loadRuns(): Promise<void> {
       : 'Nothing to show yet — try `npm run pipeline`.';
   } catch (err) {
     dom.runHint.textContent = `Failed to list runs: ${(err as Error).message}`;
+  }
+}
+
+/** Fills the corpus picker: every `generated*` folder the server can see, sample counts
+ *  along for orientation. The URL's choice survives a reload; otherwise the server's
+ *  default corpus is selected. */
+async function loadCorpora(): Promise<void> {
+  try {
+    const response = await fetch('/api/corpora');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = (await response.json()) as { corpora: { id: string; samples: number }[]; default: string };
+
+    dom.corpusSelect.innerHTML = '';
+    if (!body.corpora.length) {
+      dom.corpusSelect.innerHTML = '<option value="">default</option>';
+    }
+    for (const entry of body.corpora) {
+      const option = document.createElement('option');
+      option.value = entry.id;
+      option.textContent = `${entry.id} (${entry.samples})`;
+      dom.corpusSelect.appendChild(option);
+    }
+
+    const wanted = initialParams.get('corpus');
+    corpus = body.corpora.some((entry) => entry.id === wanted) ? wanted! : body.default;
+    dom.corpusSelect.value = corpus;
+  } catch {
+    dom.corpusSelect.innerHTML = '<option value="">default</option>';
+    corpus = '';
   }
 }
 
@@ -662,6 +809,7 @@ async function loadModels(): Promise<void> {
 function syncUrl(): void {
   const params = new URLSearchParams(location.search);
   const entries: [string, string][] = [
+    ['corpus', corpus],
     ['run', dom.runSelect.value],
     ['model', dom.modelSelect.value],
     ['res', String(currentRes())],
@@ -715,6 +863,7 @@ async function placeRun(mode: PlaceMode): Promise<void> {
       body: JSON.stringify({
         id,
         mode,
+        corpus: corpus || undefined,
         model: dom.modelSelect.value || undefined,
         resolution: currentRes(),
         reasoning: dom.reasoningSelect.value || undefined,
@@ -802,7 +951,11 @@ dom.modelSelect.addEventListener('change', () => {
   syncUrl();
 });
 
-dom.runSelect.addEventListener('change', () => {
+/** Reflects the run picker's current value on screen. `broadcast` tells the compare page's
+ *  parent frame about the change, so a linked twin pane can follow — and is off exactly
+ *  when the change *came* from the twin, which is what keeps two linked panes from
+ *  ping-ponging forever. */
+function applyRunSelection(broadcast: boolean): void {
   const id = dom.runSelect.value;
   setRunControls(!!id);
   dom.resetRun.disabled = !id;
@@ -810,13 +963,156 @@ dom.runSelect.addEventListener('change', () => {
   clearGhost();
   showRaw = false;
   syncUrl();
+  if (broadcast) broadcastRun();
   if (id) void loadRun(id);
   else {
     clearLayers();
     applyVisibility();
+    clearLlmPanel();
     setStatus('');
   }
+}
+
+dom.runSelect.addEventListener('change', () => applyRunSelection(true));
+
+/** Tells the parent frame (the compare page) which run this pane is on. */
+function broadcastRun(): void {
+  if (window.parent === window) return;
+  window.parent.postMessage({ type: 'pipeline-run', run: dom.runSelect.value }, location.origin);
+}
+
+// The compare page pushes the other pane's run here when its panes are linked. A run this
+// corpus does not contain is ignored rather than guessed at.
+window.addEventListener('message', (event) => {
+  if (event.origin !== location.origin) return;
+  const data = event.data as { type?: string; run?: string };
+  if (data?.type !== 'pipeline-set-run' || typeof data.run !== 'string') return;
+  if (data.run === dom.runSelect.value || !runs.some((run) => run.id === data.run)) return;
+  dom.runSelect.value = data.run;
+  applyRunSelection(false);
 });
+
+// Switching corpus swaps the whole sample list; whatever was on screen belongs to the old
+// one, so the stage clears rather than showing a pair the new list may not even contain.
+dom.corpusSelect.addEventListener('change', () => {
+  corpus = dom.corpusSelect.value;
+  dom.runSelect.value = '';
+  setRunControls(false);
+  dom.resetRun.disabled = true;
+  dom.placeLog.textContent = '';
+  clearGhost();
+  clearLayers();
+  applyVisibility();
+  clearLlmPanel();
+  setStatus('');
+  syncUrl();
+  void loadRuns();
+});
+
+// Compare: two of this page side by side, each pane its own viewer seeded with the
+// current corpus — pick a different one in either pane from there.
+dom.splitView.addEventListener('click', () => {
+  const seed = corpus ? `?left=${encodeURIComponent(corpus)}&right=${encodeURIComponent(corpus)}` : '';
+  location.href = `/compare.html${seed}`;
+});
+
+// Inside a compare pane the page is already split — hide the ways out of the frame.
+if (initialParams.get('embed') === '1') {
+  dom.splitView.style.display = 'none';
+  document.getElementById('navLinks')?.style.setProperty('display', 'none');
+}
+
+// ---- sidebar sizing: drag the stage's edges, or collapse a side entirely --------------
+
+interface Pane {
+  aside: HTMLElement;
+  handle: HTMLElement;
+  toggle: HTMLButtonElement;
+  width: number;
+  open: boolean;
+  min: number;
+  max: number;
+  /** Pointer x → wanted width, which is what differs between the two sides. */
+  widthAt: (x: number) => number;
+}
+
+const appGrid = el<HTMLDivElement>('app');
+const panes: Record<'left' | 'right', Pane> = {
+  left: {
+    aside: el('sidebar'),
+    handle: el('handleLeft'),
+    toggle: el<HTMLButtonElement>('toggleLeft'),
+    width: 280,
+    open: true,
+    min: 200,
+    max: 560,
+    widthAt: (x) => x,
+  },
+  right: {
+    aside: el('inspector'),
+    handle: el('handleRight'),
+    toggle: el<HTMLButtonElement>('toggleRight'),
+    width: 320,
+    open: true,
+    min: 220,
+    max: 640,
+    widthAt: (x) => window.innerWidth - x,
+  },
+};
+
+const PANE_STORE = 'pipeline-panes';
+try {
+  const stored = JSON.parse(localStorage.getItem(PANE_STORE) ?? '{}') as
+    Partial<Record<'left' | 'right', { width: number; open: boolean }>>;
+  for (const side of ['left', 'right'] as const) {
+    const saved = stored[side];
+    if (!saved) continue;
+    if (Number.isFinite(saved.width)) panes[side].width = Math.min(Math.max(saved.width, panes[side].min), panes[side].max);
+    panes[side].open = saved.open !== false;
+  }
+} catch {
+  // unreadable state is just default widths
+}
+
+function applyPanes(): void {
+  for (const side of ['left', 'right'] as const) {
+    const pane = panes[side];
+    pane.aside.classList.toggle('collapsed', !pane.open);
+    pane.handle.style.display = pane.open ? '' : 'none';
+    pane.toggle.textContent = (side === 'left') === pane.open ? '⟨' : '⟩';
+  }
+  appGrid.style.gridTemplateColumns =
+    `${panes.left.open ? panes.left.width : 0}px 1fr ${panes.right.open ? panes.right.width : 0}px`;
+  localStorage.setItem(PANE_STORE, JSON.stringify({
+    left: { width: panes.left.width, open: panes.left.open },
+    right: { width: panes.right.width, open: panes.right.open },
+  }));
+}
+
+for (const side of ['left', 'right'] as const) {
+  const pane = panes[side];
+  pane.toggle.addEventListener('click', () => {
+    pane.open = !pane.open;
+    applyPanes();
+  });
+  pane.handle.addEventListener('pointerdown', (down) => {
+    down.preventDefault();
+    pane.handle.setPointerCapture(down.pointerId);
+    pane.handle.classList.add('dragging');
+    const move = (event: PointerEvent) => {
+      pane.width = Math.min(Math.max(pane.widthAt(event.clientX), pane.min), pane.max);
+      applyPanes();
+    };
+    const up = () => {
+      pane.handle.classList.remove('dragging');
+      pane.handle.removeEventListener('pointermove', move);
+      pane.handle.removeEventListener('pointerup', up);
+    };
+    pane.handle.addEventListener('pointermove', move);
+    pane.handle.addEventListener('pointerup', up);
+  });
+}
+applyPanes();
 
 window.addEventListener('keydown', (event) => {
   const target = event.target as HTMLElement;
@@ -826,13 +1122,16 @@ window.addEventListener('keydown', (event) => {
 
 applyVisibility();
 void loadModels();
-void loadRuns().then(() => {
-  const id = initialParams.get('run') ?? runs[0]?.id;
-  if (id && runs.some((run) => run.id === id)) {
-    dom.runSelect.value = id;
-    setRunControls(true);
-    dom.resetRun.disabled = false;
-    syncUrl();
-    void loadRun(id);
-  }
-});
+void loadCorpora()
+  .then(() => loadRuns())
+  .then(() => {
+    const id = initialParams.get('run') ?? runs[0]?.id;
+    if (id && runs.some((run) => run.id === id)) {
+      dom.runSelect.value = id;
+      setRunControls(true);
+      dom.resetRun.disabled = false;
+      syncUrl();
+      broadcastRun();
+      void loadRun(id);
+    }
+  });

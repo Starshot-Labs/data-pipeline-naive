@@ -14,6 +14,7 @@ export default defineConfig({
       // HTML fallback, and honouring GENERATED_DIR is the backend's job either way.
       '/generated': backend,
       '/mesh': backend,
+      '/file': backend,
       '/out': backend,
     },
   },
@@ -26,6 +27,7 @@ export default defineConfig({
         place: resolve(__dirname, 'place.html'),
         viewer: resolve(__dirname, 'viewer.html'),
         pipeline: resolve(__dirname, 'pipeline.html'),
+        compare: resolve(__dirname, 'compare.html'),
       },
     },
   },

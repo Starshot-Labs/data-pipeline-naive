@@ -2,8 +2,8 @@
 
 The system message sent with every stage-5 placement call, verbatim from `pipeline/place.mjs`.
 It travels with the user prompt in [input.md](input.md) as a structured-output request
-(default model `google/gemini-3.1-pro-preview` via OpenRouter); the reply is constrained to
-the JSON schema shown in [output.md](output.md).
+(default model `openai/gpt-5.6-luna` with thinking disabled, via OpenRouter); the reply is
+constrained to the JSON schema shown in [output.md](output.md).
 
 ```
 You are a 3D scene composer. You get the solid geometry of an anchor object A and a movable object B, each as a list of axis-aligned solid blocks, plus a phrase describing how B should be placed relative to A. Return the transform that places B.

@@ -51,8 +51,18 @@ const REFRESH = args.includes('--refresh');
 
 const BATCH = Number(process.env.POOL_BATCH ?? 40);
 const WIDTH = widthOf('POOL_CONCURRENCY');
-// Tagging is plain classification, so it defaults to the cheap tier rather than SPEC_MODEL.
-const MODEL = process.env.POOL_MODEL ?? 'google/gemini-3.5-flash';
+// Tagging is plain classification, and the default is the cheapest model that can run with
+// thinking fully disabled — the whole Gemini flash family refuses to (OpenRouter answers
+// "Reasoning is mandatory"), and mandatory reasoning multiplied the cost of every call
+// nearly 20× ($0.07 against luna's measured $0.004).
+const MODEL = process.env.POOL_MODEL ?? 'openai/gpt-5.6-luna';
+// ...and it must not think: flash models reason by default, which multiplied the cost of
+// every call. `default` restores the provider's behaviour, low/medium/high set an effort.
+const REASONING = (() => {
+  const value = (process.env.POOL_REASONING ?? 'off').trim().toLowerCase();
+  if (value === 'default') return undefined;
+  return value === 'off' ? { enabled: false } : { effort: value };
+})();
 
 const HF = 'https://huggingface.co/datasets';
 const TRELLIS_CSV = `${HF}/JeffreyXiang/TRELLIS-500K/resolve/main/ObjaverseXL_sketchfab.csv`;
@@ -231,7 +241,7 @@ async function buildAssets() {
 
 // ------------------------------------------------------------------------------- tagging
 
-const TAG_SYSTEM = `You classify 3D assets for a scene-placement dataset, from their captions alone. For each asset decide:
+const TAG_SYSTEM = `You classify 3D assets for a scene-placement dataset, from their numbered captions. For each numbered asset return its number and:
 - junk: true when the caption describes ${JUNK}. Junk assets get empty category lists.
 - anchor: every category whose ANCHOR requirement the asset's geometry clearly affords — the anchor is the fixed object that receives a placement.
 - placed: every category whose PLACED requirement the asset clearly meets — the placed object is the one being put against the anchor.
@@ -241,6 +251,8 @@ ${CATEGORIES.map((c) => `- ${c.id} (${c.label}): anchor needs ${c.anchor}. place
 
 Be strict about placed roles — few assets qualify, often none. Tag anchor roles by affordance rather than by typical use: material decides penetrable (wooden furniture qualifies), raised forms decide drapeable-over, and almost every distinct free-standing object can anchor noncontact.`;
 
+// Assets are numbered in the prompt and answer as numbers — echoing 32-hex uids both ways
+// cost more tokens than the classification itself.
 const TAG_SCHEMA = {
   type: 'object',
   properties: {
@@ -249,12 +261,12 @@ const TAG_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          uid: { type: 'string' },
+          i: { type: 'integer' },
           junk: { type: 'boolean' },
           anchor: { type: 'array', items: { type: 'string', enum: CATEGORY_IDS } },
           placed: { type: 'array', items: { type: 'string', enum: CATEGORY_IDS } },
         },
-        required: ['uid', 'junk', 'anchor', 'placed'],
+        required: ['i', 'junk', 'anchor', 'placed'],
         additionalProperties: false,
       },
     },
@@ -263,13 +275,22 @@ const TAG_SCHEMA = {
   additionalProperties: false,
 };
 
-async function tagBatch(batch) {
-  const user = batch.map((asset) => `${asset.uid} — ${asset.caption.slice(0, 240)}`).join('\n');
-  const { data } = await chatJSON({ model: MODEL, system: TAG_SYSTEM, user, name: 'tags', schema: TAG_SCHEMA });
+async function tagBatch(batch, spend) {
+  const user = batch.map((asset, i) => `${i + 1}. ${asset.caption.slice(0, 240)}`).join('\n');
+  const { data, usage } = await chatJSON({
+    model: MODEL,
+    system: TAG_SYSTEM,
+    user,
+    name: 'tags',
+    schema: TAG_SCHEMA,
+    reasoning: REASONING,
+  });
+  spend.calls++;
+  if (typeof usage?.cost === 'number') spend.cost += usage.cost;
 
-  const byUid = new Map((data.items ?? []).map((item) => [item.uid, item]));
-  return batch.flatMap((asset) => {
-    const item = byUid.get(asset.uid);
+  const byIndex = new Map((data.items ?? []).map((item) => [item.i, item]));
+  return batch.flatMap((asset, i) => {
+    const item = byIndex.get(i + 1);
     if (!item) return []; // dropped by the model; stays pending for the next run
     const valid = (list) => [...new Set(list.filter((id) => CATEGORY_IDS.includes(id)))];
     return [{
@@ -295,18 +316,20 @@ async function tagAssets(assets) {
   console.log(`  tagging ${pending.length} asset(s) in ${batches.length} call(s) via ${MODEL}`);
 
   let done = 0;
+  const spend = { calls: 0, cost: 0 };
   await mapLimit(batches, WIDTH, async (batch) => {
     try {
-      const rows = await retry(() => tagBatch(batch));
+      const rows = await retry(() => tagBatch(batch, spend));
       // One append per batch: a crash costs at most one line, which re-tags next run.
       fs.appendFileSync(POOL_FILE, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
       done += rows.length;
-      if (done % 2000 < BATCH) console.log(`  … ${done}/${pending.length}`);
+      if (done % 2000 < BATCH) console.log(`  … ${done}/${pending.length} · $${spend.cost.toFixed(2)}`);
     } catch (err) {
       console.error(`  ✗ batch of ${batch.length}: ${err.message}`);
     }
   });
-  console.log(`  tagged ${done}/${pending.length}`);
+  console.log(`  tagged ${done}/${pending.length} — ${spend.calls} call(s), $${spend.cost.toFixed(4)}` +
+    (spend.calls ? ` ($${(spend.cost / spend.calls).toFixed(5)}/call)` : ''));
 }
 
 function summarize() {

@@ -18,12 +18,12 @@
 // each category), and relation (dealt round-robin inside each request) — so 6k penetrative
 // samples cannot collapse into 6k knives in cutting boards.
 //
-// Every request offers real assets from the pool built by objaverse-pool.mjs. The anchor
-// MUST be one of them, which is the point of seeding: the sample records the asset's uid
-// and GLB path at birth, so there is no retrieval-matching step to miss later, and the
-// anchor's description is written faithful to a mesh that actually exists. Placed objects
-// prefer a seed but may be invented when nothing offered fits — those fall back to
-// embedding retrieval downstream, and record no uid.
+// Every request offers real assets from the pool built by objaverse-pool.mjs, and BOTH
+// roles must come from them — the anchor and the placed object alike. That is the point
+// of seeding: every sample records each asset's uid and GLB path at birth, descriptions
+// are written faithful to meshes that actually exist, and no retrieval-matching step
+// exists to miss later. A category whose pool has no placed-role assets is skipped with a
+// warning rather than filled with inventions.
 //
 // Re-running is safe: existing samples count toward each category's quota, duplicates are
 // dropped against everything already on disk, and each sample folder is written the moment
@@ -183,8 +183,8 @@ function planRequests(shortfalls, buckets) {
   const plan = [];
   for (const category of CATEGORIES) {
     const bucket = buckets[category.id];
-    if (!bucket.size) {
-      console.error(`  ✗ ${category.id}: no anchors in the pool — tag more assets first`);
+    if (!bucket.size || !bucket.placedSize) {
+      console.error(`  ✗ ${category.id}: no ${bucket.size ? 'placed-role assets' : 'anchors'} in the pool — tag more assets first`);
       continue;
     }
 
@@ -232,8 +232,8 @@ For every sample return:
 - anchor_uid: the uid of the chosen anchor asset — a different asset for every sample, picked because its geometry genuinely affords the sample's assigned relation.
 - anchor_name: the plain everyday name of the thing, one or two lowercase words where possible — "bird", never "colorful bird"; a material word only when it is part of the common name ("cutting board").
 - anchor_description: one sentence of the anchor's visible form, material, colour and proportions, faithful to its caption. Describe the object alone — never a room, a background, lighting, or another object.
-- placed_uid: the uid of a provided placed-object asset when one fits the relation, otherwise null.
-- placed_name / placed_description: same rules. An invented placed object must still satisfy the category's requirement above.
+- placed_uid: the uid of the chosen placed-object asset — from the request's list, picked so its look and size fit the sample's relation. Placed assets may repeat across samples when the list is short.
+- placed_name / placed_description: same rules, faithful to the chosen asset's caption.
 - placement: the placed object's name, the sample's assigned relation, the anchor's name — then whatever the sample's detail line asks:
   - "no position detail": nothing more. "${category.examples.bare}"
   - "add one simple position": one plain position, your choice of where — "${category.examples.position}"
@@ -270,9 +270,9 @@ function userFor({ context, relations, levels }, anchors, placed, avoid) {
     '',
     'Anchor assets — choose a different one for each sample:',
     ...anchors.map(assetLine),
-    ...(placed.length
-      ? ['', 'Placed-object assets — use one when it fits, otherwise invent (placed_uid null):', ...placed.map(assetLine)]
-      : ['', 'No placed-object assets are offered — invent every placed object (placed_uid null).']),
+    '',
+    'Placed-object assets — choose one for each sample (repeats allowed):',
+    ...placed.map(assetLine),
     ...(avoid.length ? ['', `Avoid these placed objects, already used in this setting: ${avoid.join(', ')}`] : []),
   ].join('\n');
 }
@@ -288,7 +288,7 @@ const SCHEMA = {
           anchor_uid: { type: 'string' },
           anchor_name: { type: 'string' },
           anchor_description: { type: 'string' },
-          placed_uid: { type: ['string', 'null'] },
+          placed_uid: { type: 'string' },
           placed_name: { type: 'string' },
           placed_description: { type: 'string' },
           placement: { type: 'string' },
@@ -312,7 +312,7 @@ function problemWith(sample, offered, usedAnchors) {
   const anchor = offered.anchors.get(sample.anchor_uid);
   if (!anchor) return `anchor_uid ${sample.anchor_uid} was not offered`;
   if (usedAnchors.has(sample.anchor_uid)) return 'anchor asset reused within the batch';
-  if (sample.placed_uid && !offered.placed.has(sample.placed_uid)) return `placed_uid ${sample.placed_uid} was not offered`;
+  if (!offered.placed.has(sample.placed_uid)) return `placed_uid ${sample.placed_uid} was not offered`;
 
   for (const name of [sample.anchor_name, sample.placed_name]) {
     const parts = words(name ?? '');
@@ -351,7 +351,7 @@ function writeSample(sample, request, relation, level, offered) {
   const dir = path.join(GENERATED_DIR, id);
   fs.mkdirSync(dir, { recursive: true });
 
-  const placedSeed = sample.placed_uid ? offered.placed.get(sample.placed_uid) : null;
+  const placedSeed = offered.placed.get(sample.placed_uid);
   const metadata = {
     id,
     uuid,
@@ -370,7 +370,7 @@ function writeSample(sample, request, relation, level, offered) {
     placed: {
       name: sample.placed_name.trim(),
       description: sample.placed_description.trim(),
-      ...(placedSeed ? { objaverse: seedOf(placedSeed) } : {}),
+      objaverse: seedOf(placedSeed),
     },
   };
 

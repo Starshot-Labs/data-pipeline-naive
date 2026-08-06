@@ -21,6 +21,49 @@ fs.mkdirSync(GENERATED_DIR, { recursive: true });
 const app = express();
 app.use(express.json({ limit: '512mb' }));
 
+// A corpus is any folder at the repo root whose name starts with "generated" — each one a
+// self-contained set of sample folders the viewer can browse. The env-chosen GENERATED_DIR
+// stays the default whenever a request names no corpus (or names one that does not exist),
+// which is also what keeps volume-backed setups working unchanged.
+const CORPUS_NAME = /^generated[A-Za-z0-9._-]*$/;
+
+function corpusDir(name) {
+  if (typeof name === 'string' && CORPUS_NAME.test(name)) {
+    const dir = path.join(ROOT, name);
+    if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) return dir;
+  }
+  return GENERATED_DIR;
+}
+
+app.get('/api/corpora', (_req, res) => {
+  try {
+    const corpora = fs
+      .readdirSync(ROOT, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && CORPUS_NAME.test(entry.name))
+      .map((entry) => ({
+        id: entry.name,
+        samples: fs
+          .readdirSync(path.join(ROOT, entry.name), { withFileTypes: true })
+          .filter((child) => child.isDirectory()).length,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    // '' when GENERATED_DIR lives outside the repo root — the picker shows it as "default".
+    const fallback = path.dirname(GENERATED_DIR) === ROOT ? path.basename(GENERATED_DIR) : '';
+    res.json({ corpora, default: corpora.some((c) => c.id === fallback) ? fallback : '' });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Any file of one sample — metadata.json, reference images — out of the named corpus.
+// Meshes have their own route below, which knows about posed copies and the scene volume.
+app.get('/file/:corpus/:id/:name', (req, res) => {
+  const dir = corpusDir(req.params.corpus);
+  const file = path.join(dir, path.basename(req.params.id), path.basename(req.params.name));
+  if (!fs.existsSync(file)) return res.status(404).json({ error: 'no such file' });
+  res.sendFile(file, { dotfiles: 'allow' });
+});
+
 function listModels(dir, base = '') {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -53,7 +96,7 @@ app.get('/mesh/:id/:name', async (req, res) => {
   const id = path.basename(req.params.id);
   const name = path.basename(req.params.name);
 
-  const local = path.join(GENERATED_DIR, id, name);
+  const local = path.join(corpusDir(req.query.corpus), id, name);
   // A locally re-placed sample keeps its raw mesh and gains a `.posed.glb` sibling; the
   // posed one is the sample's current answer, so it is the one served — unless the caller
   // asks for the original with `?raw=1`, which is how the viewer's Reset shows the pair
@@ -112,11 +155,13 @@ const placing = new Set();
 // `full` is both. `--force` because clicking a placing button *is* the request to re-place.
 app.post('/api/place', (req, res) => {
   const id = path.basename(String(req.body?.id ?? ''));
-  if (!id || !fs.existsSync(path.join(GENERATED_DIR, id))) {
+  const corpus = corpusDir(req.body?.corpus);
+  if (!id || !fs.existsSync(path.join(corpus, id))) {
     return res.status(404).json({ error: `no sample folder named "${id}"` });
   }
-  if (placing.has(id)) return res.status(409).json({ error: `already placing ${id}` });
-  placing.add(id);
+  const key = `${corpus}|${id}`;
+  if (placing.has(key)) return res.status(409).json({ error: `already placing ${id}` });
+  placing.add(key);
 
   const mode = ['place', 'physics', 'full'].includes(req.body?.mode) ? req.body.mode : 'full';
 
@@ -150,7 +195,7 @@ app.post('/api/place', (req, res) => {
     [
       path.join(ROOT, 'pipeline', 'run.mjs'),
       mode === 'physics' ? '--physics-only' : '--force',
-      `--source=${GENERATED_DIR}`,
+      `--source=${corpus}`,
       id,
     ],
     { cwd: ROOT, env },
@@ -164,7 +209,7 @@ app.post('/api/place', (req, res) => {
   const finish = (status, body) => {
     if (done) return;
     done = true;
-    placing.delete(id);
+    placing.delete(key);
     res.status(status).json(body);
   };
   child.on('error', (err) => finish(500, { error: String(err) }));
@@ -215,7 +260,7 @@ function clampResolution(value) {
 // corpus can answer this — a sample whose meshes live on the volume voxelizes there.
 app.get('/api/blocks/:id', async (req, res) => {
   const id = path.basename(req.params.id);
-  const dir = path.join(GENERATED_DIR, id);
+  const dir = path.join(corpusDir(req.query.corpus), id);
   try {
     const meshes = fs.existsSync(dir) ? runMeshes(dir, id, readMetadata(dir)) : [];
     if (meshes.length !== 2 || !meshes.every((mesh) => fs.existsSync(path.join(dir, mesh)))) {
@@ -255,15 +300,91 @@ app.get('/api/blocks/:id', async (req, res) => {
   }
 });
 
+// The full model conversation behind a sample's placements, read back from the audit logs
+// pipeline/run.mjs writes: every log whose filename names this sample, parsed into its
+// sections, newest first. The same id can be re-placed many times and can live in several
+// corpora at once, so each log also answers whether its baked transforms are the ones the
+// sample's posed mesh carries right now — matched, not guessed from recency.
+const PLACEMENT_LOG_DIR = path.resolve(ROOT, process.env.PLACEMENT_LOG_DIR ?? 'placement-logs');
+
+function parsePlacementLog(file) {
+  const text = fs.readFileSync(file, 'utf8');
+  const [head, ...rest] = text.split(/^## /m);
+  const bullet = (name) => head.match(new RegExp(`^- ${name}: (.+)$`, 'm'))?.[1] ?? null;
+
+  const sections = {};
+  for (const chunk of rest) {
+    const eol = chunk.indexOf('\n');
+    sections[chunk.slice(0, eol).trim()] = chunk.slice(eol + 1).trim();
+  }
+  const fenced = (section = '') => section.match(/^```(?:json)?\n([\s\S]*?)\n```/m)?.[1] ?? section;
+
+  let transforms = null;
+  try {
+    transforms = JSON.parse(fenced(sections['Resolved transforms (baked)'] ?? sections['Resolved transforms']));
+  } catch {
+    transforms = null; // an older or hand-edited log still shows its text sections
+  }
+
+  return {
+    stamp: bullet('at'),
+    model: bullet('model'),
+    tokens: bullet('tokens'),
+    cost: bullet('cost'),
+    placement: (sections['Placement'] ?? '').replace(/^"([\s\S]*)"$/, '$1'),
+    system: fenced(sections['System prompt'] ?? ''),
+    user: fenced(sections['User prompt'] ?? ''),
+    answer: sections['Answer'] ?? '',
+    physics: sections['Physics'] ?? '',
+    transforms,
+  };
+}
+
+app.get('/api/placement-logs/:id', async (req, res) => {
+  const id = path.basename(req.params.id);
+  try {
+    const files = fs.existsSync(PLACEMENT_LOG_DIR)
+      ? fs.readdirSync(PLACEMENT_LOG_DIR).filter((file) => file.endsWith(`_${id}.md`)).sort().reverse()
+      : [];
+    const logs = files.map((file) => ({ file, ...parsePlacementLog(path.join(PLACEMENT_LOG_DIR, file)) }));
+
+    // The pose on screen is whatever the posed placed mesh carries; the log that baked it
+    // is the one whose resolved transforms agree. Volume-resident samples have no local
+    // file to read, so their logs simply go unmarked.
+    const dir = path.join(corpusDir(req.query.corpus), id);
+    const placedMesh = readMetadata(dir)?.placed?.mesh;
+    if (placedMesh) {
+      const posed = path.join(dir, placedMesh.replace(/\.glb$/i, '.posed.glb'));
+      const file = fs.existsSync(posed) ? posed : path.join(dir, placedMesh);
+      if (fs.existsSync(file)) {
+        const { parseGLB, extractTransform } = await import('../pipeline/glb.mjs');
+        const baked = extractTransform(parseGLB(fs.readFileSync(file)));
+        if (baked) {
+          const close = (a = [], b = []) => a.length === b.length && a.every((v, i) => Math.abs(v - b[i]) < 1e-4);
+          for (const log of logs) {
+            const placed = log.transforms?.placed;
+            log.current = !!placed && close(placed.position, baked.position) &&
+              close(placed.rotation, baked.rotation) && close(placed.scale, baked.scale);
+          }
+        }
+      }
+    }
+    res.json({ logs });
+  } catch (err) {
+    res.status(500).json({ error: String(err?.message ?? err) });
+  }
+});
+
 // Everything in generated/ with a pair of meshes to look at. A sample carries `combined_size`
 // once pipeline/run.mjs has posed it, and describes itself from there. A spec.json folder is
 // read for nothing but its id and shows its GLBs as they are, which for those is unposed.
-app.get('/api/runs', (_req, res) => {
+app.get('/api/runs', (req, res) => {
   try {
+    const corpus = corpusDir(req.query.corpus);
     const runs = [];
-    for (const entry of fs.readdirSync(GENERATED_DIR, { withFileTypes: true })) {
+    for (const entry of fs.readdirSync(corpus, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const dir = path.join(GENERATED_DIR, entry.name);
+      const dir = path.join(corpus, entry.name);
       const metadata = readMetadata(dir);
       if (metadata && !Array.isArray(metadata.combined_size)) continue;
 

@@ -18,8 +18,15 @@
 				<section class="panel">
 					<div class="panel-title">
 						<span>Run</span>
-						<button id="reloadRuns" class="ghost">Rescan</button>
+						<span>
+							<button id="splitView" class="ghost" title="Two viewers side by side, each on its own corpus">Compare ⇆</button>
+							<button id="reloadRuns" class="ghost">Rescan</button>
+						</span>
 					</div>
+					<label class="field">
+						<span>Corpus</span>
+						<select id="corpusSelect"></select>
+					</label>
 					<label class="field">
 						<span>Pipeline run</span>
 						<select id="runSelect"></select>
@@ -133,7 +140,7 @@
 					</p>
 				</section>
 
-				<p class="hint">
+				<p class="hint" id="navLinks">
 					<a href="/">← Creator</a> &nbsp;
 					<a href="/place.html">Place GLBs →</a> &nbsp;
 					<a href="/viewer.html">Sample viewer →</a>
@@ -144,6 +151,10 @@
 			<main id="stage">
 				<div id="viewport"></div>
 				<div id="selInfo" class="badge">Pick a run</div>
+				<div id="handleLeft" class="pane-handle left" title="drag to resize"></div>
+				<div id="handleRight" class="pane-handle right" title="drag to resize"></div>
+				<button id="toggleLeft" class="pane-toggle left" title="show / hide controls">⟨</button>
+				<button id="toggleRight" class="pane-toggle right" title="show / hide inspector">⟩</button>
 			</main>
 
 			<aside id="inspector">
@@ -160,6 +171,16 @@
 				<section class="panel">
 					<div class="panel-title"><span>Objects</span></div>
 					<div id="descriptions"></div>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>Placement LLM call</span></div>
+					<label class="field">
+						<span>Log</span>
+						<select id="llmSelect"></select>
+					</label>
+					<p id="llmHint" class="hint"></p>
+					<div id="llmLog" class="llm"></div>
 				</section>
 			</aside>
 		</div>

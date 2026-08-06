@@ -179,6 +179,43 @@ kbd {
 #viewport { position: absolute; inset: 0; }
 #viewport canvas { display: block; }
 
+/* Sidebar resize handles and collapse toggles — overlaid on the stage's edges, so the
+   page grid itself never changes shape, only its column widths. */
+.pane-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 6;
+}
+.pane-handle.left { left: 0; }
+.pane-handle.right { right: 0; }
+.pane-handle:hover,
+.pane-handle.dragging { background: color-mix(in srgb, var(--accent, #58a6ff) 35%, transparent); }
+
+.pane-toggle {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 7;
+  width: 18px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #000a;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+.pane-toggle:hover { background: #21262d; }
+.pane-toggle.left { left: 10px; }
+.pane-toggle.right { right: 10px; }
+
+aside.collapsed { display: none; }
+
 .badge {
   position: absolute;
   top: 12px;
@@ -210,3 +247,35 @@ kbd {
 .status.ok { color: var(--ok); }
 .status.err { color: var(--err); }
 .status.busy { color: var(--accent); }
+
+/* The placement LLM call: the exact prompts and answer behind the pose on screen, each
+   section its own collapsible so the panel stays scannable despite kilobytes of prompt. */
+.llm { display: flex; flex-direction: column; gap: 8px; }
+.llm .llm-meta { font: 11px/1.5 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
+.llm details {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.llm summary {
+  cursor: pointer;
+  padding: 7px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  user-select: none;
+}
+.llm summary:hover { color: var(--text); }
+.llm details[open] summary { border-bottom: 1px solid var(--line); }
+.llm pre {
+  margin: 0;
+  padding: 9px;
+  font: 11px/1.5 ui-monospace, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 340px;
+  overflow: auto;
+}

@@ -90,9 +90,9 @@ GLB path on Hugging Face — is recorded in the sample at birth. Two scripts, bo
 | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `node pipeline/objaverse-pool.mjs`                   | One-time: builds `pool/pool.jsonl` from TRELLIS-500K's curated 168k Sketchfab subset (captions + aesthetic ≥ 5.5), joins licenses off Objaverse's metadata shards, and LLM-tags every asset with the placement categories it can serve. |
 | `node pipeline/objaverse-pool.mjs --limit=800 --tag-limit=240 --no-licenses` | The cheap smoke version of the above.                   |
-| `node pipeline/generate-scenes.mjs --samples=50000`  | Generates scenes dealt across the six placement categories by weight — rigid ×2, soft ×1.5, the rest ×1 — each anchored on a pool asset (placed objects prefer one). Re-running fills toward the same quotas. |
+| `node pipeline/generate-scenes.mjs --samples=50000`  | Generates scenes dealt across the six placement categories by weight — rigid ×2, soft ×1.5, the rest ×1 — with **both** objects drawn from pool assets, uid and GLB path recorded at birth. Re-running fills toward the same quotas. |
 | `node pipeline/generate-scenes.mjs --samples=12 --dry` | Prints one composed prompt per category and phrase style, calls nothing.       |
-| `node pipeline/fetch-assets.mjs`                     | Downloads every sample's recorded Objaverse GLBs from Hugging Face onto the scene volume and renders each one's reference image, cached per uid. Roles without a uid are counted and left for retrieval matching. |
+| `node pipeline/fetch-assets.mjs`                     | Downloads every sample's recorded Objaverse GLBs from Hugging Face onto the scene volume and renders each one's reference image, cached per uid. Roles without a uid (corpora from before seeding was mandatory) are counted and skipped. |
 | `node pipeline/fetch-assets.mjs --source=<dir> [id ...]` | Same, into a local corpus's own folders — cache lands in `.objaverse-cache/`. |
 | `modal run --detach modal/pipeline.py --samples 50000` | The whole retrieval pipeline on Modal, end to end: pool → scenes → fetch + render → place → publish, with everything on the scene volume. |
 
@@ -171,9 +171,12 @@ what keeps it away from the hand-placed exports in `dataset/`.
 
 Four pages, all under `http://localhost:5173`:
 
-- `/pipeline.html` — **what you want.** Pick a placed sample to see the anchor and the
-  placed object together, each beside its reference image. Nothing there transforms them, so
-  what you see is what the files say. Three placing buttons, each a slice of stages 4–6:
+- `/pipeline.html` — **what you want.** Pick a **corpus** (any repo folder starting with
+  `generated`; the env `GENERATED_DIR` stays the default) and a placed sample to see the
+  anchor and the placed object together, each beside its reference image. Nothing there
+  transforms them, so what you see is what the files say. **Compare ⇆** opens
+  `/compare.html`: two of these viewers side by side, each with its own corpus and sample
+  pickers, for judging one run against another — swap panes from the top bar. Three placing buttons, each a slice of stages 4–6:
   **Place with LLM** asks the model alone with physics forced off (`OPENROUTER_API_KEY`
   must be in `.env`); **Apply Physics** presses the pose currently on screen into mesh
   contact — no model call, using the contact intent recorded when the sample was placed;
@@ -368,7 +371,8 @@ and picked up by the next run, as before.
 | `SCENE_BASE_URL`                                  | the deployed `dc-scene-ops` endpoint           | Point the pipeline at a different scene service.     |
 | `SCENE_REQUEST_TIMEOUT_S`                         | `900`                                          | How long a voxelize or bake call may take.           |
 | `POOL_DIR`                                        | `./pool`                                       | Where the Objaverse seed pool and its caches live.   |
-| `POOL_MODEL`                                      | `google/gemini-3.5-flash`                      | The pool tagger — classification, so the cheap tier. |
+| `POOL_MODEL`                                      | `openai/gpt-5.6-luna`                          | The pool tagger. Chosen because thinking can be disabled on it — Gemini's flash tier refuses, and mandatory reasoning made tagging ~20× dearer. |
+| `POOL_REASONING`                                  | `off`                                          | Tagger thinking: disabled by default; `low`/`medium`/`high` or `default` to restore. |
 | `POOL_BATCH` / `POOL_CONCURRENCY`                 | `40` / `200`                                   | Captions per tagging call, and how wide tagging runs. |
 | `POOL_LICENSES`                                   | unset (allow all)                              | Exact-match license allow-list for seeds, e.g. `by,by-sa,cc0`. |
 | `SPEC_REASONING`                                  | `low`                                          | Scene-generation thinking effort. `off` only works on models that permit disabling — `gemini-3.6-flash` does not. |

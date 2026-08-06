@@ -379,7 +379,7 @@ node pipeline/run.mjs --force --source=<folder> [sampleId ...]   # place for rea
    **A's frame**, which becomes the world frame once A is baked centred at the origin. The
    model returns
     - `scale` — the factor B's coordinates are multiplied by. B's absolute size is
-      deliberately undefined, exactly as it will be once both objects come out of Trellis.
+      deliberately undefined, so the model chooses it from what the objects are.
     - `yaw_degrees` / `pitch_degrees` / `roll_degrees` — a full 3D rotation, applied in
       that order about B's own axes and its bounding-box centre. Most placements sit
       upright with zero pitch and roll; leaning ones genuinely tilt.

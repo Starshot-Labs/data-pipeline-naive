@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Compare · Pipeline Viewer</title>
+		<style>
+			html,
+			body {
+				margin: 0;
+				height: 100%;
+				background: #0d1117;
+				color: #c9d1d9;
+				font: 13px system-ui, sans-serif;
+			}
+			#bar {
+				display: flex;
+				align-items: center;
+				gap: 14px;
+				height: 38px;
+				box-sizing: border-box;
+				padding: 0 14px;
+				border-bottom: 1px solid #21262d;
+			}
+			#bar .hint {
+				color: #8b949e;
+				flex: 1;
+			}
+			#bar a {
+				color: #58a6ff;
+				text-decoration: none;
+			}
+			#panes {
+				display: flex;
+				height: calc(100% - 38px);
+			}
+			iframe {
+				flex: 1;
+				min-width: 0;
+				border: 0;
+			}
+			#divider {
+				width: 2px;
+				background: #21262d;
+			}
+		</style>
+	</head>
+	<body>
+		<div id="bar">
+			<strong>Compare</strong>
+			<span class="hint">
+				two independent viewers, side by side — pick a corpus and a
+				sample in each to compare runs
+			</span>
+			<a href="#" id="link" title="changing the run in one pane changes it in the other">🔗 link runs</a>
+			<a href="#" id="swap">⇆ swap panes</a>
+			<a href="#" id="single">single view →</a>
+		</div>
+		<div id="panes">
+			<iframe id="left" title="left viewer"></iframe>
+			<div id="divider"></div>
+			<iframe id="right" title="right viewer"></iframe>
+		</div>
+		<style>
+			#link.on {
+				color: #3fb950;
+			}
+		</style>
+		<script>
+			const params = new URLSearchParams(location.search);
+			const pane = (corpus) =>
+				`/pipeline.html?embed=1${corpus ? `&corpus=${encodeURIComponent(corpus)}` : ''}`;
+
+			const left = document.getElementById('left');
+			const right = document.getElementById('right');
+			left.src = pane(params.get('left') ?? '');
+			right.src = pane(params.get('right') ?? params.get('left') ?? '');
+
+			// Linked panes: each pane reports its run as it changes; while the link is on,
+			// the report is forwarded to the other pane, which follows if its corpus has
+			// that sample. The panes themselves suppress re-broadcasting a followed change,
+			// so there is no echo loop.
+			const linkButton = document.getElementById('link');
+			let linked = params.get('link') === '1';
+			const runs = { left: '', right: '' };
+			let lastChanged = 'left';
+
+			const paneOf = (source) =>
+				source === left.contentWindow ? 'left' : source === right.contentWindow ? 'right' : null;
+			const push = (from) => {
+				const other = from === 'left' ? right : left;
+				if (runs[from]) other.contentWindow.postMessage({ type: 'pipeline-set-run', run: runs[from] }, location.origin);
+			};
+
+			window.addEventListener('message', (event) => {
+				if (event.origin !== location.origin) return;
+				if (event.data?.type !== 'pipeline-run') return;
+				const from = paneOf(event.source);
+				if (!from) return;
+				runs[from] = event.data.run ?? '';
+				lastChanged = from;
+				if (linked) push(from);
+			});
+
+			const renderLink = () => {
+				linkButton.classList.toggle('on', linked);
+				linkButton.textContent = linked ? '🔗 linked' : '🔗 link runs';
+				const url = new URLSearchParams(location.search);
+				if (linked) url.set('link', '1');
+				else url.delete('link');
+				history.replaceState(null, '', `${location.pathname}?${url}`);
+			};
+			linkButton.addEventListener('click', (event) => {
+				event.preventDefault();
+				linked = !linked;
+				renderLink();
+				// Turning the link on aligns the panes immediately, from whichever side the
+				// user touched last.
+				if (linked) push(lastChanged);
+			});
+			renderLink();
+
+			// The iframes navigate themselves as their pickers change, so a swap has to read
+			// each pane's *current* URL (same-origin) rather than the src it started from.
+			document.getElementById('swap').addEventListener('click', (event) => {
+				event.preventDefault();
+				const a = left.contentWindow.location.href;
+				left.src = right.contentWindow.location.href;
+				right.src = a;
+				[runs.left, runs.right] = [runs.right, runs.left];
+			});
+
+			// Leaving compare returns to the left pane's exact view, minus the embed flag.
+			document.getElementById('single').addEventListener('click', (event) => {
+				event.preventDefault();
+				const url = new URL(left.contentWindow.location.href);
+				url.searchParams.delete('embed');
+				location.href = url.pathname + url.search;
+			});
+		</script>
+	</body>
+</html>

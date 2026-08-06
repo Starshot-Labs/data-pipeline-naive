@@ -15,6 +15,12 @@ dataset/*
 pool/
 .tmp-*/
 
+# fetched objaverse assets and their renders, cached by uid
+.objaverse-cache/
+
+# local pilot corpora — meshes and renders, rebuildable from the pipeline
+generated-pilot*/
+
 # pipeline output
 generated/
 generated-1/

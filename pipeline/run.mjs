@@ -293,7 +293,6 @@ async function runSample(sourceDir, id, { dry, force }) {
     direction: answer.contact_direction,
     embed_fraction: answer.embed_fraction,
   };
-
   // The physics pass closes the gap between the voxel answer and the actual surfaces —
   // rigidly for most contacts, as a soft-body drape for cloth. Either way it refines or
   // it steps aside: any failure keeps the model's transforms and records why, because a
