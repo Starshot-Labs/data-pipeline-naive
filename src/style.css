@@ -151,7 +151,14 @@ h1 {
 .tag-a { background: var(--a); }
 .tag-b { background: var(--b); }
 
-select, textarea {
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  background: transparent;
+}
+input[type="range"]:disabled { opacity: 0.4; }
+
+select, textarea, input[type="number"] {
   width: 100%;
   background: var(--bg);
   color: var(--text);
@@ -161,7 +168,7 @@ select, textarea {
   font: inherit;
   resize: vertical;
 }
-select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+select:focus, textarea:focus, input[type="number"]:focus { outline: none; border-color: var(--accent); }
 
 .row { display: flex; gap: 6px; flex-wrap: wrap; }
 

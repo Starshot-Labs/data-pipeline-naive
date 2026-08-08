@@ -19,7 +19,9 @@
     "test-generate": "node pipeline/test-generate.mjs",
     "test-place": "node pipeline/test-place.mjs",
     "test-edit": "node pipeline/test-edit.mjs",
+    "test-segment": "node pipeline/test-segment.mjs",
     "deploy-voxhammer": "modal deploy modal/voxhammer_app.py",
+    "deploy-partfield": "modal deploy modal/partfield_app.py",
     "upload": "node pipeline/upload.mjs",
     "deploy": "modal deploy modal/scene_ops.py"
   },

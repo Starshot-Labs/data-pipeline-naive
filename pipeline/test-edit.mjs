@@ -16,13 +16,21 @@
 // here, nano-banana inserts the actual object photo into it, and that edited view is what
 // the service conditions on — the one change to the method, made at the seam it already has.
 //
+// The camera is chosen here too (camera.mjs), for the same reason. VoxHammer renders five
+// views and leaves the pick to the eye, but all five are at elevation 15 — a level orbit
+// that sees nothing whatever of a region inside a mug or a drawer. An LLM reads the same
+// occupancy grid and says which way to look in from; the service renders its candidates and
+// keeps the best-ranked one whose mask actually made it onto the screen.
+//
 //   local, this file             on the service (modal/voxhammer_app.py)
 //   1 · normalize the anchor
 //   2 · box → mask mesh
-//                        /render  3 · 5 RGB views + 2D mask, pick the most-visible view
-//   4 · nano-banana inserts the object photo into that view
-//                        /edit    5 · 150-view render, DINOv2 features, voxels, voxels_delete
-//                                 6 · invert and re-denoise, decode to GLB
+//   3 · camera angles to try
+//                        /render  4 · one RGB view + 2D mask per angle, keep the first that
+//                                     actually sees the mask
+//   5 · nano-banana inserts the object photo into that view
+//                        /edit    6 · 150-view render, DINOv2 features, voxels, voxels_delete
+//                                 7 · invert and re-denoise, decode to GLB
 //
 //   node pipeline/test-edit.mjs                 every sample in placement-set/
 //   node pipeline/test-edit.mjs sample-4 ...    specific samples
@@ -41,6 +49,7 @@ import { parseGLB, serializeGLB, sceneTriangles, bakeTransform, transformTriangl
 import { toSlices } from './voxelize.mjs';
 import { renderView } from './render.mjs';
 import { GRID, unitCube, lattice, requestBox, buildMask } from './mask.mjs';
+import { requestCamera } from './camera.mjs';
 import { generateImage } from './nano-banana.mjs';
 import { mapLimit, retry, widthOf } from './limit.mjs';
 import { writeAtomic } from './metadata.mjs';
@@ -101,9 +110,13 @@ async function buildInputs(id) {
 
   const out = path.join(OUT_DIR, id);
   if (FORCE) fs.rmSync(out, { recursive: true, force: true });
-  if (fs.existsSync(path.join(out, MASK_FILE))) {
+  // A record written before the camera was chosen has no angles to render from, so it is
+  // rebuilt rather than special-cased.
+  const maskFile = path.join(out, MASK_FILE);
+  const cached = fs.existsSync(maskFile) ? readJson(maskFile) : null;
+  if (cached?.camera) {
     say('mask already built — use --force to redo');
-    return { out, phrase, imageFile, mask: readJson(path.join(out, MASK_FILE)) };
+    return { out, phrase, imageFile, mask: cached };
   }
   fs.mkdirSync(out, { recursive: true });
   say(`"${phrase}"  anchor=${anchorFile}  object=${imageFile}`);
@@ -119,16 +132,22 @@ async function buildInputs(id) {
   const filled = occupancy.reduce((total, cell) => total + cell, 0);
   say(`1 · normalized  scale=${round(trs.scale[0])}  ${filled} of ${GRID ** 3} cells solid`);
 
+  const anchorGrid = {
+    name: nameOf(anchorFile),
+    grid: { dims: [GRID, GRID, GRID] },
+    slices: toSlices({ dims: [GRID, GRID, GRID], data: occupancy }),
+  };
+
   // 2 · the box the object may grow into, minus the anchor itself
-  const box = await retry(() => requestBox({
-    phrase,
-    object: nameOf(imageFile),
-    anchor: { name: nameOf(anchorFile), grid: { dims: [GRID, GRID, GRID] }, slices: toSlices({ dims: [GRID, GRID, GRID], data: occupancy }) },
-    model: MODEL,
-  }));
+  const box = await retry(() => requestBox({ phrase, object: nameOf(imageFile), anchor: anchorGrid, model: MODEL }));
   const mask = buildMask(box, occupancy);
   writeAtomic(path.join(out, 'mask.glb'), mask.glb);
   say(`2 · box [${box.min}]..[${box.max}]  ${mask.voxels} cells, ${mask.triangles} triangles`);
+
+  // 3 · where to look from. VoxHammer's own five views are all at elevation 15, which sees
+  // nothing at all of a region inside anything that opens upward.
+  const camera = await retry(() => requestCamera({ phrase, object: nameOf(imageFile), box, anchor: anchorGrid, model: MODEL }));
+  say(`3 · cameras ${camera.cameras.map(({ elevation, azimuth }) => `${elevation}°/${azimuth}°`).join('  ')}`);
 
   // The anchor is ghosted and the mask drawn solid and dark: a mask for "inside" sits
   // behind the anchor's near wall, so a solid anchor hides the very thing worth checking.
@@ -156,8 +175,12 @@ async function buildInputs(id) {
       volume: round(mask.volume),
       reasoning: box.reasoning,
     },
+    camera: {
+      candidates: camera.cameras,
+      reasoning: camera.reasoning,
+    },
     preview: 'mask-view.png',
-    usage: box.usage,
+    usage: { box: box.usage, camera: camera.usage },
   };
   writeJson(path.join(out, MASK_FILE), record);
   return { out, phrase, imageFile, mask: record };
@@ -173,16 +196,17 @@ async function runEdit(id, { out, phrase, imageFile, mask }) {
   const images = path.join(out, 'images');
   fs.mkdirSync(images, { recursive: true });
 
-  // 3 · the anchor view the object will be inserted into, and its 2D mask
+  // 4 · the anchor view the object will be inserted into, and its 2D mask
   const view = await renderViews({
     id,
     model: fs.readFileSync(path.join(out, 'model.glb')),
     mask: fs.readFileSync(path.join(out, 'mask.glb')),
+    cameras: mask.camera.candidates,
     log: (message) => say(`    ${message}`),
   });
   writeAtomic(path.join(images, '2d_render.png'), view.render);
   writeAtomic(path.join(images, '2d_mask.png'), view.mask);
-  say(`3 · view ${view.view}`);
+  say(`4 · view ${view.view.elevation}°/${view.view.azimuth}°  ${(view.view.coverage * 100).toFixed(2)}% of frame`);
 
   // 4 · nano-banana inserts the object photo into that view. Reused if a prior run made it,
   // since it is the one billed-per-call step on this side.
@@ -190,7 +214,7 @@ async function runEdit(id, { out, phrase, imageFile, mask }) {
   let editImage;
   if (!FORCE && fs.existsSync(editPath)) {
     editImage = fs.readFileSync(editPath);
-    say('4 · edit image (reused)');
+    say('5 · edit image (reused)');
   } else {
     editImage = await retry(() => generateImage({
       prompt: insertionPrompt(phrase, nameOf(imageFile)),
@@ -202,10 +226,10 @@ async function runEdit(id, { out, phrase, imageFile, mask }) {
       ],
     }));
     writeAtomic(editPath, editImage);
-    say('4 · edit image');
+    say('5 · edit image');
   }
 
-  // 5-6 · invert and re-denoise on the service, conditioned on the inserted-object view
+  // 6 · invert and re-denoise on the service, conditioned on the inserted-object view
   const result = await editSample({ jobId: view.jobId, edit: editImage, log: (message) => say(`    ${message}`) });
   for (const [name, bytes] of Object.entries(result.files)) {
     const file = path.join(out, name);

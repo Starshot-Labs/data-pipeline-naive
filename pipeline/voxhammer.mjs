@@ -78,11 +78,16 @@ async function download(jobId, names) {
 /**
  * Step 3. Uploads the two meshes and gets back the chosen anchor view and its 2D mask.
  * The job id it returns is what `editSample` addresses once the edited view exists.
+ *
+ * `cameras` is the ranked angles to try, best first, each `{ elevation, azimuth }` in the
+ * mask's own frame. The service renders every one of them and takes the best-ranked whose
+ * mask actually survived the anchor's geometry, reporting what each of them saw.
  */
-export async function renderViews({ id, model, mask, log = () => {} }) {
+export async function renderViews({ id, model, mask, cameras, log = () => {} }) {
   const form = new FormData();
   form.append('model', new Blob([model], { type: 'model/gltf-binary' }), 'model.glb');
   form.append('mask', new Blob([mask], { type: 'model/gltf-binary' }), 'mask.glb');
+  form.append('cameras', JSON.stringify(cameras));
   form.append('sample', id);
 
   const spawn = await fetch(`${baseUrl()}/render`, { method: 'POST', body: form, signal: AbortSignal.timeout(SPAWN_TIMEOUT_MS) });
@@ -93,7 +98,13 @@ export async function renderViews({ id, model, mask, log = () => {} }) {
 
   const status = await awaitJob(jobId, { timeoutMs: renderTimeoutMs(), log });
   const files = await download(jobId, status.files);
-  return { jobId, view: status.view, render: files['images/2d_render.png'], mask: files['images/2d_mask.png'] };
+  return {
+    jobId,
+    view: status.view,
+    seen: status.cameras_seen,
+    render: files['images/2d_render.png'],
+    mask: files['images/2d_mask.png'],
+  };
 }
 
 /**

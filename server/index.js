@@ -3,15 +3,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { segment, cut } from '../pipeline/partfield.mjs';
+import { readResult, writeCut, writeRecord } from '../pipeline/segments.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+
+// The pipeline's own entry points do this too — it is what lets PARTFIELD_BASE_URL and the
+// directory overrides be set in one place rather than in whichever shell started the server.
+const ENV_FILE = path.join(ROOT, '.env');
+if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
 
 const MODELS_DIR = process.env.MODELS_DIR ? path.resolve(process.env.MODELS_DIR) : path.join(ROOT, 'models');
 const DATASET_DIR = process.env.DATASET_DIR ? path.resolve(process.env.DATASET_DIR) : path.join(ROOT, 'dataset');
 const GENERATED_DIR = path.resolve(ROOT, process.env.GENERATED_DIR ?? 'generated');
 const PLACEMENT_RESULTS_DIR = path.resolve(ROOT, process.env.PLACEMENT_RESULTS_DIR ?? 'placement-results');
 const EDIT_RESULTS_DIR = path.resolve(ROOT, process.env.EDIT_RESULTS_DIR ?? 'edit-results');
+const SEGMENT_RESULTS_DIR = path.resolve(ROOT, process.env.SEGMENT_RESULTS_DIR ?? 'segment-results');
 const DIST_DIR = path.join(ROOT, 'dist');
 const PORT = Number(process.env.PORT ?? 3000);
 
@@ -20,6 +28,7 @@ fs.mkdirSync(DATASET_DIR, { recursive: true });
 fs.mkdirSync(GENERATED_DIR, { recursive: true });
 fs.mkdirSync(PLACEMENT_RESULTS_DIR, { recursive: true });
 fs.mkdirSync(EDIT_RESULTS_DIR, { recursive: true });
+fs.mkdirSync(SEGMENT_RESULTS_DIR, { recursive: true });
 
 const app = express();
 app.use(express.json({ limit: '512mb' }));
@@ -47,6 +56,7 @@ app.use('/dataset', express.static(DATASET_DIR));
 app.use('/generated', express.static(GENERATED_DIR));
 app.use('/placement-results', express.static(PLACEMENT_RESULTS_DIR));
 app.use('/edit-results', express.static(EDIT_RESULTS_DIR));
+app.use('/segment-results', express.static(SEGMENT_RESULTS_DIR));
 
 // A posed mesh is read out of the sample's own folder when it is there, and pulled back from
 // the scene volume when it is not — baking writes to the volume, so whether a sample's GLBs
@@ -179,6 +189,98 @@ app.get('/api/edits', (_req, res) => {
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+});
+
+/**
+ * PartField part segmentation, from the browser.
+ *
+ * The service is a couple of minutes of A10G for a mesh it has not seen, so a request starts a
+ * job and is polled — the same shape the service itself presents, and the same shape the rest
+ * of this file's Modal work takes. The job is only a progress bar: what is worth keeping is
+ * written into segment-results/ as it lands, in the layout pipeline/test-segment.mjs writes, so
+ * a mesh dropped into the page and a mesh named on the command line are afterwards the same
+ * thing. Keyed by result id, since two segmentations of one mesh would be writing to one folder.
+ */
+const segmenting = new Map();
+
+function startJob(id, work) {
+  const job = { id, status: 'running', stage: 'queued', error: null, started: Date.now() };
+  segmenting.set(id, job);
+  work((stage) => {
+    job.stage = stage;
+  })
+    .then(() => Object.assign(job, { status: 'done', stage: 'done' }))
+    .catch((err) => Object.assign(job, { status: 'failed', error: String(err?.message ?? err) }));
+  return job;
+}
+
+app.get('/api/segments', (_req, res) => {
+  try {
+    const samples = [];
+    for (const entry of fs.readdirSync(SEGMENT_RESULTS_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const result = readResult(path.join(SEGMENT_RESULTS_DIR, entry.name));
+      if (result) samples.push({ id: result.id ?? entry.name, faces: result.faces, cuts: result.on_disk });
+    }
+    res.json({ samples: samples.sort((a, b) => a.id.localeCompare(b.id)) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get('/api/segments/:id', (req, res) => {
+  const id = sanitizeDirName(req.params.id);
+  try {
+    const result = readResult(path.join(SEGMENT_RESULTS_DIR, id));
+    const job = segmenting.get(id) ?? null;
+    if (!result && !job) return res.status(404).json({ error: `no segmentation for ${id}` });
+    res.json({ result, job });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// The mesh arrives as the raw body rather than as base64 in JSON like /api/export: it is one
+// file of tens of megabytes and there is no metadata to carry beside it, so the query string
+// does for the rest.
+app.post('/api/segments', express.raw({ type: () => true, limit: '512mb' }), (req, res) => {
+  const name = path.basename(String(req.query.name ?? 'mesh.glb'));
+  const id = sanitizeDirName(name.replace(/\.[^.]+$/, ''));
+  if (!id) return res.status(400).json({ error: 'the mesh needs a usable name' });
+  if (!req.body?.length) return res.status(400).json({ error: 'no mesh in the request body' });
+  if (segmenting.get(id)?.status === 'running') return res.status(409).json({ error: `${id} is already segmenting` });
+
+  const parts = Number(req.query.parts ?? 8);
+  const maxClusters = Number(req.query.max_clusters ?? 20);
+  const model = req.body;
+  const dir = path.join(SEGMENT_RESULTS_DIR, id);
+
+  startJob(id, async (stage) => {
+    const result = await segment({ id, model, filename: name, parts, maxClusters, log: stage });
+    writeRecord(dir, { id, source: name, job: result.jobId, summary: result.summary, cuts: [await writeCut(dir, result)] });
+  });
+  res.json({ id });
+});
+
+// Another level of a hierarchy already built, which is seconds rather than minutes and never
+// touches a GPU. What makes the viewer's parts slider worth dragging.
+app.post('/api/segments/:id/cut', (req, res) => {
+  const id = sanitizeDirName(req.params.id);
+  const dir = path.join(SEGMENT_RESULTS_DIR, id);
+  const record = readResult(dir);
+  if (!record?.job) return res.status(404).json({ error: `no segmented job for ${id}` });
+  if (segmenting.get(id)?.status === 'running') return res.status(409).json({ error: `${id} is already segmenting` });
+
+  const parts = Number(req.body?.parts);
+  if (!record.levels?.includes(parts)) {
+    return res.status(400).json({ error: `${id} was clustered to ${record.levels?.at(-1)} parts, not ${parts}` });
+  }
+
+  startJob(id, async (stage) => {
+    const result = await cut({ jobId: record.job, parts, log: stage });
+    writeRecord(dir, { ...record, summary: result.summary, cuts: [await writeCut(dir, result)] });
+  });
+  res.json({ id, parts });
 });
 
 // Lists sample folders and the .glb files inside them. Reads directory entries

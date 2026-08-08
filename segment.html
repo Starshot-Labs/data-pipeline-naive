@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Part Segmentation · Placement Data Creator</title>
+	</head>
+	<body>
+		<div id="app">
+			<aside id="sidebar">
+				<h1>Part Segmentation</h1>
+				<p class="hint">
+					NVIDIA PartField, running on Modal
+					(<code>modal/partfield_app.py</code>). It learns a feature
+					field over a shape and clusters it under the mesh's own face
+					adjacency — no prompt, no class list, no second view.
+				</p>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Mesh</span>
+						<button id="rescan" class="ghost">Rescan</button>
+					</div>
+					<label class="field">
+						<select id="sampleSelect"></select>
+					</label>
+					<span class="drop" id="drop">
+						<input
+							type="file"
+							id="file"
+							accept=".glb,.obj,.off"
+							hidden
+						/>
+						<span id="dropLabel"
+							>Drop a .glb to segment, or click to choose</span
+						>
+					</span>
+					<p class="hint">
+						A mesh it has not seen takes a minute or two of A10G.
+						Whatever lands is kept in <code>segment-results/</code>,
+						so it is here next time.
+					</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Existing Partitions</span>
+					</div>
+					<select id="levelSelect" disabled></select>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Generate Partitions</span>
+					</div>
+					<div class="row">
+						<input
+							type="number"
+							id="generateLevel"
+							min="1"
+							max="20"
+							step="1"
+							value="8"
+							style="flex: 1;"
+						/>
+						<button id="generateBtn" class="primary">Generate</button>
+					</div>
+					<p id="levelHint" class="hint">
+						Clustering returns a hierarchy, not one answer. Levels
+						already fetched load instantly; the rest are cut from the
+						same tree in a few seconds, without the GPU.
+					</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>View</span></div>
+					<label class="field">
+						<span class="hint">Explode <kbd>X</kbd></span>
+						<input
+							type="range"
+							id="explode"
+							min="0"
+							max="100"
+							step="1"
+							value="0"
+						/>
+					</label>
+					<div class="row">
+						<button id="showAll" class="seg">All parts</button>
+						<button id="frameView" class="seg">
+							Frame <kbd>F</kbd>
+						</button>
+					</div>
+					<p class="hint">
+						Click a part to hide it, <kbd>1</kbd>–<kbd>9</kbd> to
+						solo one, <kbd>0</kbd> to show every part again.
+					</p>
+				</section>
+
+				<p class="hint">
+					<a href="/edit.html">← Edit</a> &nbsp;
+					<a href="/viewer.html">Dataset →</a>
+				</p>
+				<p id="status" class="status"></p>
+			</aside>
+
+			<main id="stage">
+				<div id="viewport"></div>
+				<div id="selInfo" class="badge">Pick a mesh</div>
+			</main>
+
+			<aside id="inspector">
+				<section class="panel">
+					<div class="panel-title"><span>Parts</span></div>
+					<div id="parts" class="models"></div>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>Job</span></div>
+					<div id="numbers" class="bbox"></div>
+				</section>
+
+				<div id="cards"></div>
+			</aside>
+		</div>
+		<script type="module" src="/src/segment-viewer.ts"></script>
+	</body>
+</html>

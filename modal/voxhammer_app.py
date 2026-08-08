@@ -56,6 +56,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 import modal
 
@@ -64,6 +65,7 @@ app = modal.App("dc-voxhammer")
 REPO = "/voxhammer"
 CACHE = "/cache"
 JOBS = "/jobs"
+RENDERER = "/root/voxhammer_render.py"
 
 # VoxHammer pins torch 2.4.0/cu118 and spconv-cu118, so the base has to match. python 3.10
 # is not a preference either: bpy publishes one wheel per Blender release per minor version,
@@ -176,6 +178,8 @@ image = (
     .pip_install("kaolin", find_links="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.4.0_cu118.html")
     # Last, so iterating on the checkout does not rebuild the stack above it.
     .run_commands(f"git clone --depth 1 https://github.com/Nelipot-Lee/VoxHammer.git {REPO}")
+    # Mounted rather than copied, so editing the renderer costs a deploy and not a rebuild.
+    .add_local_file(Path(__file__).parent / "voxhammer_render.py", f"{RENDERER}")
 )
 
 cache = modal.Volume.from_name("voxhammer-cache", create_if_missing=True)
@@ -223,27 +227,86 @@ def _prepare_trellis() -> str:
     return TRELLIS_DIR
 
 
-def _pick_view(images_dir: Path) -> tuple[Path, Path]:
-    """The view showing most of the editable region.
+# A view catching only a sliver of the region is not usable: the object has to be painted
+# into it and then found again by comparing against the clean render. One part in two hundred
+# of a 1024² frame is roughly a 72 px square. Measured against real samples, a usable angle
+# lands between 2% and 5% and a marginal one an order of magnitude below that, so the floor
+# sits in the gap rather than close to either side.
+MIN_COVERAGE = 5e-3
 
-    The README leaves this to the eye — "select one pair" — which a batch cannot do. The
-    mask is what the object gets inserted into and what the cross-attention mask is built
-    from, so the most useful view is simply the one where the most of it is visible.
+
+def _pick_view(images_dir: Path, cameras: list[dict]) -> tuple[Optional[int], list[dict]]:
+    """The best-ranked candidate whose mask actually landed on screen, and what each saw.
+
+    The README leaves the choice to the eye — "select one pair" — which a batch cannot do.
+    The caller's model ranks the angles from the phrase and the occupancy grid, which is the
+    part it can reason about; whether the region survives the anchor's own geometry is a
+    question only the depth comparison answers. So the ranking is the preference and this is
+    the veto. Returns no index rather than raising, so the coverage it measured can be
+    recorded against the job before the failure is.
     """
     import cv2
 
-    best = None
-    for mask_path in sorted(images_dir.glob("mask_*.png")):
-        render_path = images_dir / mask_path.name.replace("mask_", "render_")
-        if not render_path.exists():
-            continue
-        visible = int((cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) > 0).sum())
-        if best is None or visible > best[0]:
-            best = (visible, render_path, mask_path)
+    seen = []
+    for index, camera in enumerate(cameras):
+        mask_path = images_dir / f"mask_{index:04d}.png"
+        rendered = (images_dir / f"render_{index:04d}.png").is_file()
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) if mask_path.is_file() else None
+        coverage = None if mask is None or not rendered else round(float((mask > 0).mean()), 6)
+        seen.append({**camera, "coverage": coverage})
 
-    if best is None or best[0] == 0:
-        raise RuntimeError("no view shows any of the mask — is it inside the anchor?")
-    return best[1], best[2]
+    chosen = next(
+        (i for i, candidate in enumerate(seen) if (candidate["coverage"] or 0) >= MIN_COVERAGE),
+        None,
+    )
+    return chosen, seen
+
+
+def _match_size(reference: Path, target: Path) -> None:
+    """The edited view resampled to the render's size, which VoxHammer assumes but never checks.
+
+    `preprocess_image` derives its resize factor from the source view alone — `min(1, 1024 /
+    max(src.size))`, which is exactly 1 for a 1024 render, so its resize branch never runs. It
+    then takes the union of the two objects' bounding boxes and crops *both* images with it. A
+    512 target against a 1024 render is therefore cropped in the wrong coordinate system: the
+    object lands at half scale, off centre, in a frame that is three quarters padding, while
+    the cross-attention mask is cropped correctly and points somewhere else entirely. The
+    structure stage gets a target condition that contradicts the geometry pinned around it and
+    predicts no new occupancy, so the edit returns the original asset untouched.
+    """
+    from PIL import Image
+
+    with Image.open(reference) as source:
+        size = source.size
+    with Image.open(target) as edited:
+        if edited.size == size:
+            return
+        print(f"resampling 2d_edit {edited.size} -> {size}", flush=True)
+        edited.convert("RGB").resize(size, Image.LANCZOS).save(target)
+
+
+def _cameras(raw: str) -> list[dict]:
+    """The caller's ranked angles, best first, checked before a GPU is spent on them."""
+    try:
+        candidates = json.loads(raw)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"cameras is not JSON: {err}") from err
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("cameras must be a non-empty list of {elevation, azimuth}")
+
+    clean = []
+    for candidate in candidates:
+        try:
+            elevation = float(candidate["elevation"])
+            azimuth = float(candidate["azimuth"])
+        except (TypeError, KeyError, ValueError) as err:
+            raise ValueError(f"bad camera {candidate!r}: {err}") from err
+        # The poles leave the camera's up vector undefined, and looking straight down a
+        # cavity is no better than looking down it at 80.
+        if not -90 < elevation < 90:
+            raise ValueError(f"elevation {elevation} is not between -90 and 90")
+        clean.append({"elevation": elevation, "azimuth": azimuth % 360})
+    return clean
 
 
 def _run(command: list[str], stage: str) -> None:
@@ -259,7 +322,7 @@ def _fail(job_id: str, err: Exception) -> None:
 
 @app.function(image=image, volumes=VOLUMES, gpu=GPU, timeout=30 * 60)
 def render(job_id: str) -> None:
-    """Step 3: the 5 RGB views and their 2D masks, then the pick of the most-visible one.
+    """Step 3: one RGB view and 2D mask per candidate angle, then the pick of them.
 
     Writes `images/2d_render.png` and `images/2d_mask.png` — the view the caller inserts the
     object into, and the region to insert it in — and stops. No weights, no A100-scale work;
@@ -275,22 +338,35 @@ def render(job_id: str) -> None:
 
     started = time.time()
     try:
-        view = jobs[job_id].get("view")
+        # The uploads were written by the web container. A warm worker still holds the volume
+        # as it was when it mounted, where this job's directory does not exist yet, and
+        # Blender reports that as "Please select a file" rather than a missing path.
+        jobs_volume.reload()
+
+        record = jobs[job_id]
+        view, seen = record.get("view"), record.get("cameras_seen")
         if not ((images / "2d_render.png").is_file() and (images / "2d_mask.png").is_file()):
-            stage("render views")
+            cameras = record["cameras"]
+            stage(f"render {len(cameras)} view(s)")
             _run(
                 [
-                    "python", "utils/render_rgb_and_mask.py",
+                    "python", RENDERER,
                     "--source_model", str(uploads / "model.glb"),
                     "--mask_model", str(uploads / "mask.glb"),
                     "--output_dir", str(work),
+                    "--cameras", json.dumps(cameras),
                 ],
-                "render_rgb_and_mask",
+                "voxhammer_render",
             )
-            render_path, mask_path = _pick_view(images)
-            shutil.copy(render_path, images / "2d_render.png")
-            shutil.copy(mask_path, images / "2d_mask.png")
-            view = render_path.name
+            index, seen = _pick_view(images, cameras)
+            # Recorded before the check, so a job that saw nothing still says what it looked at.
+            jobs[job_id] = {**jobs[job_id], "cameras_seen": seen}
+            if index is None:
+                raise RuntimeError(f"no candidate view shows the mask — is it sealed inside the anchor? {json.dumps(seen)}")
+
+            shutil.copy(images / f"render_{index:04d}.png", images / "2d_render.png")
+            shutil.copy(images / f"mask_{index:04d}.png", images / "2d_mask.png")
+            view = seen[index]
 
         jobs_volume.commit()
         jobs[job_id] = {
@@ -298,6 +374,7 @@ def render(job_id: str) -> None:
             "status": "done",
             "stage": "rendered",
             "view": view,
+            "cameras_seen": seen,
             "files": ["images/2d_render.png", "images/2d_mask.png"],
             "seconds": round(time.time() - started, 1),
             "updated_at": time.time(),
@@ -338,6 +415,7 @@ def edit(job_id: str) -> None:
         for required in ("2d_render.png", "2d_mask.png", "2d_edit.png"):
             if not (images / required).is_file():
                 raise RuntimeError(f"missing images/{required} — call /render and supply the edited image first")
+        _match_size(images / "2d_render.png", images / "2d_edit.png")
 
         stage("load pipeline")
         # Both the voxel masking step and TRELLIS's own configs reach for `assets/…` by
@@ -432,46 +510,73 @@ def web():
     async def start_render(
         model: UploadFile = File(...),
         mask: UploadFile = File(...),
+        cameras: str = Form(...),
         sample: str = Form(""),
     ):
         """Step 3. Both meshes must already be in TRELLIS's cube — see the module docstring.
 
-        The job id is a hash of the two meshes, so re-posting the same pair attaches to the
-        render already taken for it, and `/edit` addresses that same job by id.
+        `cameras` is the caller's ranked angles as JSON, best first, in the mask's own frame:
+        elevation above the horizontal, azimuth around +Y from the model's +Z front.
+
+        The job id is a hash of the meshes and those angles, so re-posting the same request
+        attaches to the render already taken for it while a changed angle starts a new job
+        rather than quietly reusing a view taken from somewhere else.
         """
         model_bytes = await model.read()
         mask_bytes = await mask.read()
-        digest = hashlib.sha256(model_bytes + mask_bytes).hexdigest()[:10]
+        try:
+            candidates = _cameras(cameras)
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+
+        canonical = json.dumps(candidates, sort_keys=True)
+        digest = hashlib.sha256(model_bytes + mask_bytes + canonical.encode()).hexdigest()[:10]
         job_id = f"vh-{re.sub(r'[^a-z0-9-]+', '-', sample.lower()) or 'job'}-{digest}"
 
-        uploads = Path(JOBS) / job_id / "inputs"
-        uploads.mkdir(parents=True, exist_ok=True)
-        (uploads / "model.glb").write_bytes(model_bytes)
-        (uploads / "mask.glb").write_bytes(mask_bytes)
-        jobs_volume.commit()
+        # Admission is all blocking work — two 20 MB volume writes, a commit that covers
+        # whatever the GPU workers are writing at the same time, and two RPCs. Eight requests
+        # share this container's event loop, so running any of it inline stalls every other
+        # upload in flight and a batch posted together walks past the client's deadline.
+        def write_uploads() -> None:
+            uploads = Path(JOBS) / job_id / "inputs"
+            uploads.mkdir(parents=True, exist_ok=True)
+            (uploads / "model.glb").write_bytes(model_bytes)
+            (uploads / "mask.glb").write_bytes(mask_bytes)
 
-        jobs[job_id] = {
-            "status": "pending",
-            "stage": "queued",
-            "sample": sample,
-            "created_at": time.time(),
-        }
-        render.spawn(job_id)
+        await asyncio.to_thread(write_uploads)
+        # Committed before the spawn, not after: the worker mounts the volume as it starts.
+        await jobs_volume.commit.aio()
+        await jobs.put.aio(
+            job_id,
+            {
+                "status": "pending",
+                "stage": "queued",
+                "sample": sample,
+                "cameras": candidates,
+                "created_at": time.time(),
+            },
+        )
+        await render.spawn.aio(job_id)
         return {"job_id": job_id, "sample": sample}
 
     @api.post("/edit")
     async def start_edit(job_id: str = Form(...), edit_image: UploadFile = File(...)):
         """Steps 5-6 for a job `/render` already prepared, against the caller's edited view."""
-        if job_id not in jobs:
+        record = await jobs.get.aio(job_id)
+        if record is None:
             raise HTTPException(status_code=404, detail=f"no job {job_id} — call /render first")
 
         images = Path(JOBS) / job_id / "images"
-        images.mkdir(parents=True, exist_ok=True)
-        (images / "2d_edit.png").write_bytes(await edit_image.read())
-        jobs_volume.commit()
+        edited = await edit_image.read()
 
-        jobs[job_id] = {**jobs[job_id], "status": "pending", "stage": "queued-edit", "updated_at": time.time()}
-        edit.spawn(job_id)
+        def write_edit() -> None:
+            images.mkdir(parents=True, exist_ok=True)
+            (images / "2d_edit.png").write_bytes(edited)
+
+        await asyncio.to_thread(write_edit)
+        await jobs_volume.commit.aio()
+        await jobs.put.aio(job_id, {**record, "status": "pending", "stage": "queued-edit", "updated_at": time.time()})
+        await edit.spawn.aio(job_id)
         return {"job_id": job_id}
 
     @api.get("/jobs/{job_id}")
