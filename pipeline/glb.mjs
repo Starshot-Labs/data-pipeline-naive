@@ -1,7 +1,7 @@
 // Minimal GLB reader/writer: enough to pull world-space triangles out of a
 // glTF binary and to bake a rigid transform back into one.
 
-import { Matrix4, Vector3, Quaternion } from 'three';
+import { Box3, Matrix4, Vector3, Quaternion } from 'three';
 
 const MAGIC = 0x46546c67;
 const CHUNK_JSON = 0x4e4f534a;
@@ -136,6 +136,84 @@ export function sceneTriangles(glb) {
 
   if (!out.length) throw new Error('GLB has no triangles');
   return new Float64Array(out);
+}
+
+/** World-space triangles for one child of a room's single root object. */
+export function nodeTriangles(glb, index) {
+  const { json } = glb;
+  const scene = json.scenes?.[json.scene ?? 0];
+  if (!scene) throw new Error('GLB has no scene');
+  const roots = scene.nodes ?? [];
+  if (roots.length !== 1) throw new Error(`expected one root node holding the objects, found ${roots.length}`);
+
+  const root = json.nodes[roots[0]];
+  const child = root.children?.[index];
+  if (child === undefined) throw new Error(`room has no object at child index ${index}`);
+
+  const out = [];
+  const visit = (nodeIndex, parent) => {
+    const node = json.nodes[nodeIndex];
+    const world = parent.clone().multiply(localMatrix(node));
+    if (node.mesh !== undefined) {
+      for (const primitive of json.meshes[node.mesh].primitives) collectPrimitive(glb, primitive, world, out);
+    }
+    for (const nested of node.children ?? []) visit(nested, world);
+  };
+  visit(child, localMatrix(root));
+  if (!out.length) throw new Error(`room object ${index} has no triangles`);
+  return new Float64Array(out);
+}
+
+const AXIS_EPS = 1e-6;
+
+/** Whether a matrix maps the axes onto themselves, which is what makes an AABB exact under it. */
+function axisAligned({ elements: e }) {
+  return [e[1], e[2], e[4], e[6], e[8], e[9]].every((value) => Math.abs(value) < AXIS_EPS);
+}
+
+function subtreeBounds(glb, index, parent, box) {
+  const { json } = glb;
+  const node = json.nodes[index];
+  const world = parent.clone().multiply(localMatrix(node));
+
+  if (node.mesh !== undefined) {
+    if (!axisAligned(world)) throw new Error(`node "${node.name}" is rotated, so its box would only bound it loosely`);
+    for (const primitive of json.meshes[node.mesh].primitives) {
+      const accessor = json.accessors[primitive.attributes?.POSITION];
+      if (!accessor?.min || !accessor?.max) throw new Error(`node "${node.name}" has a POSITION accessor without min/max`);
+      const local = new Box3(new Vector3().fromArray(accessor.min), new Vector3().fromArray(accessor.max));
+      box.union(local.applyMatrix4(world));
+    }
+  }
+  for (const child of node.children ?? []) subtreeBounds(glb, child, world, box);
+  return box;
+}
+
+/**
+ * One world-space bounding box per object in a scene, read off the POSITION accessors' own
+ * min/max — which the spec requires them to carry — rather than off the vertices.
+ *
+ * An object is a child of the scene's single root node, which is how the 3D-FRONT rooms are
+ * packaged: one `world` node holding one node per piece of furniture, each with its placement
+ * baked into its vertices. A box read this way is exact only while nothing on the path to a
+ * mesh is rotated, so a rotated node throws rather than quietly handing back a box bigger than
+ * the object it is supposed to describe. `index` is the child's position under the root, which
+ * is how a caller finds the same object again through a glTF loader.
+ */
+export function nodeBounds(glb) {
+  const { json } = glb;
+  const scene = json.scenes?.[json.scene ?? 0];
+  if (!scene) throw new Error('GLB has no scene');
+  const roots = scene.nodes ?? [];
+  if (roots.length !== 1) throw new Error(`expected one root node holding the objects, found ${roots.length}`);
+
+  const root = json.nodes[roots[0]];
+  const world = localMatrix(root);
+  return (root.children ?? []).map((child, index) => {
+    const box = subtreeBounds(glb, child, world, new Box3());
+    if (box.isEmpty()) throw new Error(`node "${json.nodes[child].name}" has no geometry`);
+    return { index, name: json.nodes[child].name ?? `node_${child}`, min: box.min.toArray(), max: box.max.toArray() };
+  });
 }
 
 /** The same flat triangle list with `trs` applied to every vertex. */

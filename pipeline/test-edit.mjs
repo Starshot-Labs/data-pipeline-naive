@@ -32,7 +32,7 @@
 //                        /edit    6 · 150-view render, DINOv2 features, voxels, voxels_delete
 //                                 7 · invert and re-denoise, decode to GLB
 //
-//   node pipeline/test-edit.mjs                 every sample in placement-set/
+//   node pipeline/test-edit.mjs                 every sample in data/placement-set/
 //   node pipeline/test-edit.mjs sample-4 ...    specific samples
 //   node pipeline/test-edit.mjs --mask-only     stop after the mask, call no service
 //   --force  --set=DIR  --out=DIR  --concurrency=N
@@ -44,7 +44,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { ROOT, fromRoot, PLACEMENT_SET_DIR, EDIT_RESULTS_DIR } from './paths.mjs';
 import { parseGLB, serializeGLB, sceneTriangles, bakeTransform, transformTriangles } from './glb.mjs';
 import { toSlices } from './voxelize.mjs';
 import { renderView } from './render.mjs';
@@ -56,15 +56,11 @@ import { writeAtomic } from './metadata.mjs';
 import { listSamples, readSample, nameOf } from './samples.mjs';
 import { renderViews, editSample, health } from './voxhammer.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ENV_FILE = path.join(ROOT, '.env');
-if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
-
 const args = process.argv.slice(2);
 const flag = (name, fallback) => args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 
-const SET_DIR = path.resolve(ROOT, flag('set', 'placement-set'));
-const OUT_DIR = path.resolve(ROOT, flag('out', 'edit-results'));
+const SET_DIR = flag('set') ? fromRoot(flag('set')) : PLACEMENT_SET_DIR;
+const OUT_DIR = flag('out') ? fromRoot(flag('out')) : EDIT_RESULTS_DIR;
 const FORCE = args.includes('--force');
 // Narrow by default, unlike the other stages: a worker holds the anchor's whole triangle
 // soup and a 192³ sampling grid at once, and half a dozen of those exhaust the heap.

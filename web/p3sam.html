@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>P3-SAM · Data Creator</title>
+	</head>
+	<body>
+		<div id="app">
+			<aside id="sidebar">
+				<h1>P3-SAM</h1>
+				<p class="hint">
+					Native automatic 3D part segmentation from
+					<a href="https://github.com/Tencent-Hunyuan/Hunyuan3D-Part/tree/main/P3-SAM" target="_blank" rel="noreferrer">Hunyuan3D-Part</a>.
+					CUDA, Sonata, and the checkpoint run entirely on Modal.
+				</p>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Mesh</span>
+						<button id="rescan" class="ghost">Rescan</button>
+					</div>
+					<select id="resultSelect"></select>
+					<span class="drop" id="drop">
+						<input type="file" id="file" accept=".glb,.obj,.ply" hidden />
+						<span id="dropLabel">Drop a .glb, .obj, or .ply — or click to choose</span>
+					</span>
+					<p class="hint">
+						The first request builds a remote container and loads about 900 MB of weights. Results persist in
+						<code>data/p3sam-results/</code>.
+					</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>Inference</span></div>
+					<label class="check-row">
+						<input id="postProcess" type="checkbox" checked />
+						<span>Merge small connected regions</span>
+					</label>
+					<label class="field">
+						<span class="hint">Merge threshold</span>
+						<input id="threshold" type="number" min="0.01" max="1" step="0.01" value="0.95" />
+					</label>
+					<label class="field">
+						<span class="hint">Random seed</span>
+						<input id="seed" type="number" step="1" value="42" />
+					</label>
+					<p class="hint">Lower thresholds merge more small parts. The upstream auto-mask path always samples 100,000 points and 400 prompts.</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>View</span></div>
+					<label class="field">
+						<span class="hint">Explode <kbd>X</kbd></span>
+						<input type="range" id="explode" min="0" max="100" step="1" value="0" />
+					</label>
+					<div class="row">
+						<button id="showAll" class="seg">All parts</button>
+						<button id="frameView" class="seg">Frame <kbd>F</kbd></button>
+					</div>
+					<a id="download" class="download-link" href="#" download>Download segmented GLB</a>
+				</section>
+
+				<p id="status" class="status">Choose a mesh to begin.</p>
+			</aside>
+
+			<main id="stage">
+				<div id="viewport"></div>
+				<div id="selInfo" class="badge">No result loaded</div>
+				<div id="progress" class="progress-card" hidden>
+					<div class="spinner"></div>
+					<strong id="progressStage">Starting Modal…</strong>
+					<span id="progressTime">0:00</span>
+				</div>
+			</main>
+
+			<aside id="inspector">
+				<section class="panel">
+					<div class="panel-title"><span>Parts</span></div>
+					<div id="parts" class="models"></div>
+				</section>
+				<section class="panel">
+					<div class="panel-title"><span>Result</span></div>
+					<div id="numbers" class="bbox"></div>
+				</section>
+				<p class="hint license-note">
+					P3-SAM is subject to the Tencent Hunyuan 3D-Part Community License. Sonata weights are CC BY-NC 4.0.
+					This local tool is not affiliated with, sponsored by, or endorsed by Tencent.
+				</p>
+			</aside>
+		</div>
+		<script type="module" src="/src/p3sam-viewer.ts"></script>
+	</body>
+</html>

@@ -20,11 +20,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { ROOT } from './paths.mjs';
 
 const run = promisify(execFile);
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const DEFAULT_BASE_URL = 'https://starshot-aitools--dc-scene-ops-web.modal.run';
 const LANE_PARAM = { tex: 'texture_dir', geo: 'geometry_dir' };

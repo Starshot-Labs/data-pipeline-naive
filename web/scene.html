@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Scene Edits · Placement Data Creator</title>
+	</head>
+	<body>
+		<div id="app">
+			<aside id="sidebar">
+				<h1>Scene Edits</h1>
+				<p class="hint">
+					One 3D-FRONT room, one instruction, a tile per LLM. Every
+					model is handed the same scene as a list of bounding boxes
+					and answers with an ordered array of scene-operation calls.
+				</p>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Run</span>
+						<button id="rescan" class="ghost">Rescan</button>
+					</div>
+					<label class="field">
+						<select id="runSelect"></select>
+					</label>
+					<p id="runHint" class="hint"></p>
+					<div class="row">
+						<select
+							id="sceneSelect"
+							style="flex: 1 1 130px; min-width: 0"
+						></select>
+						<button id="createRun">New</button>
+					</div>
+					<p class="hint">
+						New first identifies every object from four axis-marked
+						views with GPT-5.6 Luna, then creates the run. Structural
+						floor, ceiling, wall and other geometry is left unchanged.
+					</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>Objects</span></div>
+					<div id="objects"></div>
+					<p class="hint">
+						Names, IDs and front axes come from the four-view pass and
+						are what every placement model reads. Names can still be
+						corrected here. Click a row to ring it in every tile.
+					</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Instruction</span>
+						<button id="togglePrompt" class="ghost">Prompt</button>
+					</div>
+					<textarea
+						id="promptInput"
+						rows="3"
+						placeholder="move the chair to the left side of the bed"
+					></textarea>
+					<button id="savePrompt" class="primary" disabled>
+						Save instruction
+					</button>
+					<p id="promptHint" class="hint"></p>
+					<pre id="promptText" class="prompt-text" hidden></pre>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title">
+						<span>Models</span>
+						<button id="runDefault" class="ghost">Run default</button>
+					</div>
+					<div id="modelPicker" class="model-picker">
+						<div id="modelControl" class="model-picker__control">
+							<div id="modelChips" class="model-picker__chips"></div>
+							<input
+								id="modelSearch"
+								type="search"
+								placeholder="Search all OpenRouter models…"
+								autocomplete="off"
+								role="combobox"
+								aria-autocomplete="list"
+								aria-expanded="false"
+								aria-controls="modelMenu"
+							/>
+						</div>
+						<div
+							id="modelMenu"
+							class="model-picker__menu"
+							role="listbox"
+							aria-multiselectable="true"
+							hidden
+						></div>
+					</div>
+					<button id="addViews" class="primary" disabled>
+						Run selected models
+					</button>
+					<p id="modelHint" class="hint">
+						Loading the OpenRouter model catalogue…
+					</p>
+				</section>
+
+				<section class="panel">
+					<div class="panel-title"><span>View</span></div>
+					<div class="row">
+						<button id="toggleTextured" class="seg active">
+							Textures
+						</button>
+						<button id="toggleTint" class="seg">Tint edits</button>
+					</div>
+					<div class="row">
+						<button id="toggleBoxes" class="seg active">Boxes</button>
+						<button id="frameView" class="seg">
+							Frame <kbd>F</kbd>
+						</button>
+						<button id="planView" class="seg">
+							Top <kbd>T</kbd>
+						</button>
+					</div>
+					<label class="field">
+						<span class="hint">Columns</span>
+						<select id="columns">
+							<option value="0">Auto</option>
+							<option value="1">1</option>
+							<option value="2">2</option>
+							<option value="3">3</option>
+							<option value="4">4</option>
+						</select>
+					</label>
+					<p class="hint">
+						Every tile shares one camera, so dragging anywhere moves
+						them all.
+					</p>
+				</section>
+
+				<p id="status" class="status"></p>
+			</aside>
+
+			<main id="stage">
+				<div id="tiles"></div>
+			</main>
+		</div>
+		<script type="module" src="/src/scene-viewer.ts"></script>
+	</body>
+</html>

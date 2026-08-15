@@ -1,4 +1,4 @@
-// The single-anchor placement paradigm, benchmarked over placement-set/ across
+// The single-anchor placement paradigm, benchmarked over data/placement-set/ across
 // several LLMs. A sample gives only an anchor GLB, a photo of the object to place
 // and the placement phrase; the placed mesh does not exist yet and is generated.
 //
@@ -22,7 +22,7 @@
 //
 // Results, with everything a model does not decide shared between them:
 //
-//   placement-results/<sample>/
+//   data/placement-results/<sample>/
 //     anchor.glb  anchor-view.png  placed-generated.png  placed-raw.glb
 //     generation.json                          written last, marks the half done
 //     <model-slug>/placed.glb  scene-view.png  placement.json
@@ -33,8 +33,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { Euler, MathUtils, Quaternion, Vector3 } from 'three';
+import { ROOT, fromRoot, PLACEMENT_SET_DIR, PLACEMENT_RESULTS_DIR } from './paths.mjs';
 import { parseGLB, serializeGLB, sceneTriangles, bakeTransform, forceOpaqueMaterials, transformTriangles } from './glb.mjs';
 import { voxelize, toSlices } from './voxelize.mjs';
 import { renderView, ISO_VIEW } from './render.mjs';
@@ -46,15 +47,11 @@ import { mapLimit, retry, widthOf } from './limit.mjs';
 import { writeAtomic } from './metadata.mjs';
 import { listSamples as listIn, nameOf, readSample } from './samples.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ENV_FILE = path.join(ROOT, '.env');
-if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
-
 const args = process.argv.slice(2);
 const flag = (name, fallback) => args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 
-const SET_DIR = path.resolve(ROOT, flag('set', 'placement-set'));
-const OUT_DIR = path.resolve(ROOT, flag('out', 'placement-results'));
+const SET_DIR = flag('set') ? fromRoot(flag('set')) : PLACEMENT_SET_DIR;
+const OUT_DIR = flag('out') ? fromRoot(flag('out')) : PLACEMENT_RESULTS_DIR;
 const FORCE = args.includes('--force');
 
 // The models under benchmark. Every one is asked the same question about the same

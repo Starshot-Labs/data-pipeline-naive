@@ -12,11 +12,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ENV_FILE = path.join(ROOT, '.env');
-if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
+import { ROOT, fromRoot, EDIT_RESULTS_DIR } from './paths.mjs';
 
 const BASE_URL = process.env.VOXHAMMER_BASE_URL ?? 'https://starshot-aitools--dc-voxhammer-web.modal.run';
 
@@ -27,7 +23,7 @@ const numbers = (name, fallback) => flag(name, fallback).split(',').map(Number);
 const id = args.find((a) => !a.startsWith('--'));
 if (!id) throw new Error('usage: node pipeline/probe-camera.mjs <sample> [--elevations=..] [--azimuths=..]');
 
-const dir = path.join(path.resolve(ROOT, flag('out', 'edit-results')), id);
+const dir = path.join(flag('out') ? fromRoot(flag('out')) : EDIT_RESULTS_DIR, id);
 const elevations = numbers('elevations', '15,30,45,60,75');
 const azimuths = numbers('azimuths', '0');
 const cameras = elevations.flatMap((elevation) => azimuths.map((azimuth) => ({ elevation, azimuth })));

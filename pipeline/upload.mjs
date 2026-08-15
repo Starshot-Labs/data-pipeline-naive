@@ -11,18 +11,12 @@
 // They go last on purpose. A folder with meshes but no metadata.json is a sample mid-flight;
 // one with metadata.json is finished, which is exactly the test `published` applies.
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { GENERATED_DIR } from './paths.mjs';
 import { mapLimit, retry, widthOf } from './limit.mjs';
 import * as scene from './scene.mjs';
 import * as meta from './metadata.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ENV_FILE = path.join(ROOT, '.env');
-if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
-
-const GENERATED_DIR = path.resolve(ROOT, process.env.GENERATED_DIR ?? 'generated');
 // Lower than the model stages by default: this one answers to `dc-scene-ops`, which
 // serialises volume writes per container, so extra width only deepens a queue.
 const PUBLISH_WIDTH = widthOf('PUBLISH_CONCURRENCY', 50);

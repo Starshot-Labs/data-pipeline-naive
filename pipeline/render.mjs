@@ -31,9 +31,10 @@ function viewMatrix({ azimuth_deg, elevation_deg }) {
 
 /**
  * PNG bytes of one or more triangle sets seen from `view`, framed together.
- * Each layer is `{ triangles, base?, dither? }` — `triangles` flat 9-float
+ * Each layer is `{ triangles, base?, dither?, fit? }` — `triangles` flat 9-float
  * world-space triangles as produced by `sceneTriangles`, `base` the colour of a
- * face square to the light as one number for a grey or `[r, g, b]`, and `dither`
+ * face square to the light as one number for a grey or `[r, g, b]`, `fit: false`
+ * draws a reference layer without including it in the camera framing, and `dither`
  * renders it screen-door transparent (every other subpixel), which the
  * supersampled downscale turns into a smooth ghost. That is what lets a scene
  * view show an object placed inside a cavity. The projection is orthographic,
@@ -46,7 +47,7 @@ export async function renderView(layers, { size = 1024, view = ISO_VIEW } = {}) 
   // One pass into view space, so the shared fit and the fill read the same coordinates.
   const vertex = new Vector3();
   let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
-  const projectedLayers = layers.map(({ triangles, base = BASE, dither = false }) => {
+  const projectedLayers = layers.map(({ triangles, base = BASE, dither = false, fit = true }) => {
     const tint = Array.isArray(base) ? base : [base, base, base];
     const projected = new Float64Array(triangles.length);
     for (let i = 0; i < triangles.length; i += 3) {
@@ -54,10 +55,12 @@ export async function renderView(layers, { size = 1024, view = ISO_VIEW } = {}) 
       projected[i] = vertex.x;
       projected[i + 1] = vertex.y;
       projected[i + 2] = vertex.z;
-      if (vertex.x < minX) minX = vertex.x;
-      if (vertex.x > maxX) maxX = vertex.x;
-      if (vertex.y < minY) minY = vertex.y;
-      if (vertex.y > maxY) maxY = vertex.y;
+      if (fit) {
+        if (vertex.x < minX) minX = vertex.x;
+        if (vertex.x > maxX) maxX = vertex.x;
+        if (vertex.y < minY) minY = vertex.y;
+        if (vertex.y > maxY) maxY = vertex.y;
+      }
     }
     return { projected, tint, dither };
   });

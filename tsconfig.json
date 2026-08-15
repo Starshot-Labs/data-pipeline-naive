@@ -14,5 +14,5 @@
     "noEmit": true,
     "types": ["three"]
   },
-  "include": ["src"]
+  "include": ["web/src"]
 }

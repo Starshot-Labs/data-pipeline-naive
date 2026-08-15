@@ -1,7 +1,7 @@
 // Steps 4-6: voxelize both meshes, ask an LLM where the placed object goes, then bake that
 // answer into the two GLBs and record the sizes it produces.
 //
-//   node pipeline/run.mjs                    every unplaced sample in generated/
+//   node pipeline/run.mjs                    every unplaced sample in data/generated/
 //   node pipeline/run.mjs <sampleId> ...     specific samples
 //   node pipeline/run.mjs --source=other     read a different folder of samples
 //   node pipeline/run.mjs --dry              print the LLM prompt, call no model
@@ -15,23 +15,19 @@
 // can be re-placed as many times as you like without re-meshing it. `combined_size` in the
 // metadata is what marks one done.
 
-import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { Vector3, Quaternion, MathUtils } from 'three';
+import { fromRoot, GENERATED_DIR } from './paths.mjs';
 import { requestPlacement, buildPrompt } from './place.mjs';
 import { mapLimit, retry, widthOf } from './limit.mjs';
 import * as scene from './scene.mjs';
 import * as meta from './metadata.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ENV_FILE = path.join(ROOT, '.env');
-if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
-
 const args = process.argv.slice(2);
 const flag = (name, fallback) => args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 
-const SOURCE_DIR = path.resolve(ROOT, flag('source', process.env.GENERATED_DIR ?? 'generated'));
+const SOURCE_DIR = flag('source') ? fromRoot(flag('source')) : GENERATED_DIR;
 const RESOLUTION = {
   anchor: Number(process.env.VOXEL_RES_ANCHOR ?? 64),
   placed: Number(process.env.VOXEL_RES_PLACED ?? 32),

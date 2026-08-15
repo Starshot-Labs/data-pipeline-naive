@@ -10,21 +10,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import * as paths from './paths.mjs';
 import { proposeSamples, planRequests, CONTEXTS } from './generate.mjs';
 import { ANCHOR_VIEW, randomView, imagePrompt, renderImage } from './images.mjs';
 import { generateMeshes } from './trellis-farm.mjs';
 import { mapLimit, retry, widthOf } from './limit.mjs';
 import * as meta from './metadata.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ENV_FILE = path.join(ROOT, '.env');
-if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
-
 const args = process.argv.slice(2);
 const flag = (name, fallback) => args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 
-export const GENERATED_DIR = path.resolve(ROOT, flag('out', process.env.GENERATED_DIR ?? 'generated'));
+export const GENERATED_DIR = flag('out') ? paths.fromRoot(flag('out')) : paths.GENERATED_DIR;
 const BATCH = Number(process.env.SPEC_BATCH ?? 20);
 const SPEC_WIDTH = widthOf('SPEC_CONCURRENCY');
 const IMAGE_WIDTH = widthOf('IMAGE_CONCURRENCY');

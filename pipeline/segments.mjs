@@ -2,7 +2,7 @@
 // serves one, so a run started from a terminal and a run started by dropping a file into the
 // browser leave the same thing behind:
 //
-//   segment-results/<id>/
+//   data/segment-results/<id>/
 //     parts_NN.glb    one named, coloured node per part, in the source mesh's own frame
 //     labels_NN.bin   little-endian int32 per face, the part face i belongs to
 //     parts_NN.png    an isometric look at the cut

@@ -73,6 +73,7 @@ JOBS = "/jobs"
 # (torch, cuda) pair, and the README's is the pair PartField was trained and released against.
 PYTHON = "3.10"
 GPU = "A10G"
+MAX_GPU_CONTAINERS = 35
 
 CKPT_REPO = "mikaelaangel/partfield-ckpt"
 CKPT_FILE = "model_objaverse.ckpt"
@@ -361,7 +362,13 @@ def _fail(job_id: str, err: Exception) -> None:
     }
 
 
-@app.function(image=image, volumes=VOLUMES, gpu=GPU, timeout=60 * 60)
+@app.function(
+    image=image,
+    volumes=VOLUMES,
+    gpu=GPU,
+    max_containers=MAX_GPU_CONTAINERS,
+    timeout=60 * 60,
+)
 def segment(job_id: str, num_parts: int) -> None:
     """Feature field, then the clustering hierarchy, then one cut of it as a GLB.
 

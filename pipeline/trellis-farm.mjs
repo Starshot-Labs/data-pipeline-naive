@@ -33,10 +33,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { ROOT } from './paths.mjs';
 import * as scene from './scene.mjs';
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const DEFAULT_BASE_URL = 'https://starshot-aitools--trellis2-latent-farm-web.modal.run';
 // The extensions the farm's dispatcher picks up; anything else is silently ignored there.

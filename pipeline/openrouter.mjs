@@ -33,10 +33,11 @@ export async function chat(body) {
 }
 
 /** Structured-output call: returns the parsed JSON payload plus what it cost. */
-export async function chatJSON({ model, system, user, name, schema, temperature }) {
+export async function chatJSON({ model, system, user, name, schema, temperature, reasoning }) {
   const body = await chat({
     model,
     ...(temperature === undefined ? {} : { temperature }),
+    ...(reasoning === undefined ? {} : { reasoning }),
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user },
@@ -47,4 +48,29 @@ export async function chatJSON({ model, system, user, name, schema, temperature 
   const content = body.choices?.[0]?.message?.content;
   if (!content) throw new Error(`OpenRouter returned no content: ${JSON.stringify(body).slice(0, 500)}`);
   return { data: JSON.parse(content), model: body.model ?? model, usage: body.usage ?? null };
+}
+
+/** Structured-output vision call with local image bytes encoded as data URLs. */
+export async function chatJSONWithImages({ model, system, user, images, name, schema, temperature, reasoning }) {
+  const content = [
+    { type: 'text', text: user },
+    ...images.map(({ mimeType = 'image/png', data }) => ({
+      type: 'image_url',
+      image_url: { url: `data:${mimeType};base64,${data.toString('base64')}`, detail: 'high' },
+    })),
+  ];
+  const body = await chat({
+    model,
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(reasoning === undefined ? {} : { reasoning }),
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content },
+    ],
+    response_format: { type: 'json_schema', json_schema: { name, strict: true, schema } },
+  });
+
+  const answer = body.choices?.[0]?.message?.content;
+  if (!answer) throw new Error(`OpenRouter returned no content: ${JSON.stringify(body).slice(0, 500)}`);
+  return { data: JSON.parse(answer), model: body.model ?? model, usage: body.usage ?? null };
 }

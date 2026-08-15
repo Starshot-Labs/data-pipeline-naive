@@ -9,12 +9,33 @@ For the version that builds samples on its own — invent them, render reference
 mesh them, then let an LLM decide the placement — see
 [Automated pipeline](#automated-pipeline).
 
-**Just want to run it?** [RUNNING.md](RUNNING.md) is the practical guide: every script, what
-each one costs, and the end-to-end sequence. This file covers why it is built the way it is.
+**Just want to run it?** [docs/RUNNING.md](docs/RUNNING.md) is the practical guide: every
+script, what each one costs, and the end-to-end sequence. This file covers why it is built the
+way it is.
+
+## Repository layout
+
+```
+web/          the browser client — one HTML page per tool, all sharing src/
+server/       the Express API the pages read their samples through
+pipeline/     the seven-stage sample pipeline, and the benchmark experiments
+modal/        the Modal apps: scene ops, and the PartField and VoxHammer services
+docs/         RUNNING.md (every command) and METADATA.md (the sample format)
+data/         everything on disk — samples, meshes, renders, experiment output
+```
+
+`pipeline/` and `modal/` sit at the root rather than under a source directory because Modal
+mounts them as `/app/pipeline` and `/app/modal` inside the container. Keeping the two layouts
+identical is what lets `modal/selftest.mjs` import `../pipeline/build.mjs` in both places.
+
+Nothing under `data/` is in the repo except `data/placement-set/`, the benchmark inputs both
+placement experiments read. `pipeline/paths.mjs` is the one place those directories are
+resolved: each keeps its own environment override, and `DATA_DIR` relocates the whole tree at
+once — a relative override is read from the repo root, an absolute one is taken as given.
 
 ## What a sample contains
 
-Each export writes a new folder `dataset/<assetA>_<uuid>/`. A single `uuid` is generated
+Each export writes a new folder `data/dataset/<assetA>_<uuid>/`. A single `uuid` is generated
 per export and every file is named `<assetName>_<uuid>`:
 
 | File                  | Description                                                                                                                                           |
@@ -49,7 +70,7 @@ To add `b_only` / `a_to_b` to samples exported before this was tracked, run
 npm install
 ```
 
-Drop your `.glb` (or `.gltf`) files into the `models/` folder.
+Drop your `.glb` (or `.gltf`) files into the `data/models/` folder.
 
 ## Run (development)
 
@@ -78,8 +99,9 @@ npm start            # serves the built client + API on port 3000
 
 ## Configuration (env vars)
 
-- `MODELS_DIR` — folder scanned for source GLBs (default `./models`).
-- `DATASET_DIR` — folder where samples are written (default `./dataset`).
+- `MODELS_DIR` — folder scanned for source GLBs (default `./data/models`).
+- `DATASET_DIR` — folder where samples are written (default `./data/dataset`).
+- `DATA_DIR` — the parent of both, and of every other directory (default `./data`).
 - `PORT` — backend port (default `3000`).
 
 ## Usage
@@ -101,7 +123,7 @@ npm start            # serves the built client + API on port 3000
 - **Images:** both renders are square (`1024²` by default) with the object centered. The A
   image uses the fixed front/pitch view; the B image reuses **your live camera's angle** but
   repositions to center B. Tune `IMAGE_SIZE`, `IMAGE_A_FOV`, and `PITCH_DOWN_DEG` in
-  `src/exporter.ts`.
+  `web/src/exporter.ts`.
 - **Scale:** each GLB's authored scale is preserved on load (no auto-normalization), so
   relative sizes between A and B start faithful. You can then scale either object with the
   gizmo (`R`); the applied scale is baked into the exported GLB and recorded in the metadata
@@ -113,7 +135,7 @@ npm start            # serves the built client + API on port 3000
 `pipeline/` builds samples without anyone posing anything by hand. Seven stages: 1-3 invent
 a sample and turn it into two meshes, 4-6 decide how those meshes go together and bake it
 in, and 7 publishes the result. Every sample is one self-contained folder described by
-[METADATA.md](METADATA.md), which is both what the stages read and what gets uploaded.
+[docs/METADATA.md](docs/METADATA.md), which is both what the stages read and what gets uploaded.
 
 One command takes a pair count all the way through:
 
@@ -303,8 +325,8 @@ volume get <run_id>/glb`. That means the CLI and workspace credentials have to b
 Each sample lands as one self-contained folder:
 
 ```
-generated/<anchor>_<uuid>/
-  metadata.json      everything known about the sample — see METADATA.md
+data/generated/<anchor>_<uuid>/
+  metadata.json      everything known about the sample — see docs/METADATA.md
   placement.txt      the phrase on its own, mirroring metadata's `placement`
   <anchor>_<uuid>.png   <anchor>_<uuid>.glb
   <placed>_<uuid>.png   <placed>_<uuid>.glb
@@ -316,7 +338,7 @@ The two roles are `anchor` and `placed` throughout, and every file in a folder i
 Knobs: `SPEC_MODEL` (default `google/gemini-3.1-pro-preview`, an OpenRouter id), `IMAGE_MODEL`
 (`gemini-3.1-flash-image-preview`, a Google one), `SPEC_BATCH` (`20`),
 `SPEC_CONCURRENCY` / `IMAGE_CONCURRENCY` (`200`), `MODEL_ATTEMPTS` (`3`),
-`GENERATED_DIR` (`./generated`), plus `TRELLIS_BASE_URL`, `TRELLIS_OUTPUT_VOLUME`
+`GENERATED_DIR` (`./data/generated`), plus `TRELLIS_BASE_URL`, `TRELLIS_OUTPUT_VOLUME`
 (`t2farm-output-v2`), `TRELLIS_INPUT_VOLUME` (`t2farm-input-v2`), `TRELLIS_MODAL_BIN`
 (`modal`), `TRELLIS_STAGE` (`.trellis-stage`),
 `TRELLIS_STATE` (`.trellis-campaign.json`), `TRELLIS_POLL_S` (`10`),
@@ -343,13 +365,13 @@ dead shard or a plain error, deletes nothing and leaves the whole lot for the ne
 ### 4-6 · Placement
 
 ```bash
-npm run pipeline                  # every sample in generated/
+npm run pipeline                  # every sample in data/generated/
 npm run pipeline -- <sampleId>    # specific samples
 npm run pipeline -- --dry         # print the LLM prompt, call nothing
 ```
 
 A folder needs a `metadata.json` to be read at all, which is also what keeps this away from
-the hand-placed exports in `dataset/`: it bakes in place, and baking over a human's
+the hand-placed exports in `data/dataset/`: it bakes in place, and baking over a human's
 arrangement would destroy the thing that made it worth keeping.
 
 4. **Voxelize** (`voxelize.mjs`) — triangles are surface-sampled onto a 3×-subdivided
@@ -433,7 +455,7 @@ campaigns cannot overlap; this is a small, always-idle CPU service that several 
 at once. Mixing them would mean redeploying the farm to change a voxel setting, and a crash
 in one would take the other's endpoint down with it.
 
-The commands live in `modal/ops.mjs` and run under Node, reusing `pipeline/glb.mjs` and
+The commands live in `pipeline/ops.mjs` and run under Node, reusing `pipeline/glb.mjs` and
 `pipeline/voxelize.mjs` unchanged — those grids decide what the placement model sees, and a
 Python reimplementation could shift them in ways no test would catch. `modal/scene_ops.py` is
 the thin wrapper that mounts the volumes and decides when each command syncs them.
@@ -466,6 +488,95 @@ arrangement comes entirely from the files, which is the point of looking.
 
 The meshes are read out of the sample's own folder when they are there and off the scene
 volume when they are not, and each object's reference image is shown beside its description.
-#   d a t a - p i p e l i n e 
- 
- 
+
+## P3-SAM on Modal
+
+The native P3-SAM automatic segmentation demo runs remotely, including its CUDA 12.4
+Chamfer extension and Sonata encoder; the browser remains local. Deploy it with
+`npm run deploy-p3sam`, optionally warm the checkpoint volume with
+`npm run prefetch-p3sam`, then run `npm run dev` and open
+**http://localhost:5173/p3sam.html**. Uploads are asynchronous and completed GLBs, face-label
+arrays, and metadata are cached under `data/p3sam-results/`. Full commands, output semantics,
+and license restrictions are in [docs/RUNNING.md](docs/RUNNING.md#p3-sam-on-modal).
+
+## Scene editing
+
+A second, unrelated comparison: **how well can an LLM rearrange a whole room?** One indoor
+scene, one instruction — "move the chair to the left side of the bed" — and a tile per model
+showing what it did. `npm run dev`, then **http://localhost:5173/scene.html**.
+
+The scenes are 3D-FRONT rooms as
+[MIDI packages them](https://huggingface.co/datasets/huanngzh/3D-Front), read out of
+`data/3d-front/` (`modal/front3d_fetch.py` puts the source splits on a volume,
+`npm run audit-front3d` verifies exact object-to-node matching, `npm run clean-front3d`
+normalizes the assembled-room identifiers in place with reversible JSON-chunk backups, and
+`npm run pull-scenes` copies rooms out). Each is a single `world` node with one child per object,
+every transform identity and the placement baked into the vertices, already centred on the
+origin with its longest axis at 1.9. In the normalized dataset each node and mesh is named exactly
+like its source object GLB, including `.glb`. A `<room>.glb` is furniture only, so the floor is the
+lowest point in the scene. A `<room>_full.glb` holds that same furniture at the same coordinates
+plus the room's optional `floor`, `wall`, `ceil`, and `others` children.
+
+A **run** is a scene and a prompt; a folder per model beside it holds that model's answer:
+
+```
+data/scene-edits/<runId>/
+  run.json                 the scene it points at, the prompt, the measured boxes
+  <model-slug>/edit.json   the calls as given, and the final transforms they resolve to
+```
+
+Before its first run, a scene is identified once. Every non-structural object is rendered from
+camera yaws 0°, 90°, 180° and 270°, with the camera slightly above it and world +X/+Y/+Z axes
+drawn red/green/blue. The four PNGs go together to `openai/gpt-5.6-luna` with reasoning effort
+`none`; its concise name, scene-local semantic ID and front axis (`+X`, `-X`, `+Z`, `-Z`, or no
+meaningful front) are persisted under `data/scene-edits/_scenes/<scene>/objects.json` beside the
+views. Objects whose source IDs are exactly `floorglb`, `ceilglb`, `wallglb` or `othersglb`
+bypass that pass, retain those IDs unchanged and have no direction.
+
+A run copies those identified objects into `run.json`, and every model's prompt is built from
+that manifest alone — including each semantic name/ID and front axis. This is what makes "they
+all saw the same scene" a fact rather than a hope. The instruction is written afterwards;
+object names can still be corrected through `POST /api/scene-runs/:id/labels`, while structural
+names remain locked. A model cannot be asked until the run has an instruction.
+
+Asking one is `POST /api/scene-runs/:id/models`, which starts a job the page polls. Answers
+persist as they land, so closing a tile and opening it again costs nothing and `↻` is the only
+thing that spends a second model request.
+
+A model does not fill one compound transform record. It returns an ordered `calls` array using
+`move_object(id, center)`, `rotate_object(id, yaw_degrees)`, `scale_object(id, factor)`, and
+`delete_object(id)`. Calls on the same object compose in order; invalid calls are recorded in
+`rejected` without preventing later calls from executing. The persisted `resolved` array is the
+collapsed final pose each tile can apply directly.
+
+Four decisions worth knowing:
+
+- **Coordinates reach the model as integers**, the normalised frame multiplied by `unit_scale`
+  (100), so a room spans roughly ±95 and a bed measures 88 × 50 × 75. Three decimal places of
+  a scale nothing can name are a source of arithmetic mistakes and nothing else. Metres are
+  not recoverable — MIDI's normalisation discarded them — so nothing pretends otherwise.
+- **`yaw_degrees` is a change, not a heading.** The four-view identification pass records the
+  object's current world-axis facing. Placement models receive that axis and return the relative
+  yaw needed to reach the requested direction.
+- **Names and IDs are semantic and scene-local.** Luna replaces ambiguous source categories such
+  as `Cabinet_Shelf_Desk` with names like `nightstand` or `wardrobe`, adding numeric suffixes when
+  a room contains duplicates. `prompt_hash` is derived on read rather than stored, so correcting
+  a name — or rewording the instruction — immediately marks prior answers stale.
+- **Left and right are fixed in the system prompt**, as the viewer's in a view along +Z, and
+  the page opens on that view — otherwise the comparison turns on each model's private guess.
+  Models still disagree about whether "the left side of the bed" means the viewer's left or the
+  bed's own, which is the sort of thing this is for.
+
+The client keeps **one WebGL context for the whole grid**: a tile is a hole in a layer over a
+single canvas, and a frame walks the tiles setting the scissor box to each in turn. A context
+per tile would upload its own copy of every geometry and texture in the room, so eight tiles on
+a 13 MB room would be eight times the video memory, and browsers evict contexts past sixteen.
+Every tile is drawn with the same camera, since six variants seen from six angles compare
+nothing, and framing comes from the run's bounds rather than from what a tile holds — so a
+model that answers with a coordinate a hundred times too large leaves the frame instead of
+wrecking it. <kbd>T</kbd> is the view worth reaching for: from overhead nothing occludes
+anything, which matters because a model can legitimately park a chair behind a wardrobe.
+
+A call that cannot be applied — an id that does not exist, an operation after deleting its
+object, or invalid arguments — is recorded in `rejected` and badged on the tile rather than
+dropped, and the calls either side of it still stand.

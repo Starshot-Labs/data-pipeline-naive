@@ -5,8 +5,8 @@
 // decomposition without a prompt, a class list or a second view. It runs on Modal — see
 // modal/partfield_app.py — and this drives it over a set of meshes.
 //
-//   node pipeline/test-segment.mjs                    every anchor in placement-set/
-//   node pipeline/test-segment.mjs a.glb dataset/     explicit meshes, or folders of them
+//   node pipeline/test-segment.mjs                       every anchor in data/placement-set/
+//   node pipeline/test-segment.mjs a.glb data/dataset/   explicit meshes, or folders of them
 //   --parts=8       one cut
 //   --parts=8,5,3   the same hierarchy read at three granularities, which is what the right
 //                   number of parts being a property of the shape rather than the model makes
@@ -21,21 +21,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { ROOT, fromRoot, PLACEMENT_SET_DIR, SEGMENT_RESULTS_DIR } from './paths.mjs';
 import { mapLimit, widthOf } from './limit.mjs';
 import { segment, cut, health } from './partfield.mjs';
 import { RESULT, writeCut, writeRecord } from './segments.mjs';
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ENV_FILE = path.join(ROOT, '.env');
-if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
 
 const args = process.argv.slice(2);
 const flag = (name, fallback) => args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 const number = (name) => (flag(name) === undefined ? undefined : Number(flag(name)));
 
-const SET_DIR = path.resolve(ROOT, flag('set', 'placement-set'));
-const OUT_DIR = path.resolve(ROOT, flag('out', 'segment-results'));
+const SET_DIR = flag('set') ? fromRoot(flag('set')) : PLACEMENT_SET_DIR;
+const OUT_DIR = flag('out') ? fromRoot(flag('out')) : SEGMENT_RESULTS_DIR;
 const FORCE = args.includes('--force');
 // One in flight is one A10G, and the service holds a job's features and hierarchy on a volume
 // until it is discarded, so this is a bill as much as it is a rate.
@@ -105,9 +101,7 @@ async function run(file) {
 // experiments' reader and insists on a source photo and a phrase that a segmentation has no
 // use for — a sample missing either would take the whole run down before it started.
 const requested = args.filter((arg) => !arg.startsWith('--'));
-const meshes = (requested.length ? requested : [SET_DIR]).flatMap((target) =>
-  meshesUnder(path.resolve(ROOT, target)),
-);
+const meshes = (requested.length ? requested : [SET_DIR]).flatMap((target) => meshesUnder(fromRoot(target)));
 
 if (!meshes.length) throw new Error(`no .glb found in ${requested.join(', ') || path.relative(ROOT, SET_DIR)}`);
 console.log(`${meshes.length} mesh(es) → ${path.relative(ROOT, OUT_DIR)}`);
