@@ -23,6 +23,7 @@ const groups: NavGroup[] = [
     items: [
       { href: '/viewer.html', page: 'viewer.html', label: 'Dataset', title: 'Inspect exported dataset samples' },
       { href: '/pipeline.html', page: 'pipeline.html', label: 'Pipeline', title: 'Inspect generated pipeline runs' },
+      { href: '/internscenes.html', page: 'internscenes.html', label: 'InternScenes', title: 'Inspect downloaded InternScenes exports' },
     ],
   },
   {

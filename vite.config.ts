@@ -6,7 +6,7 @@ const root = resolve(__dirname, 'web');
 
 // Each page is its own entry point: the client is a set of separate tools rather than one app
 // with routes, so nothing is shared between them beyond src/.
-const PAGES = ['index', 'place', 'viewer', 'pipeline', 'placement', 'edit', 'segment', 'p3sam', 'scene'];
+const PAGES = ['index', 'place', 'viewer', 'pipeline', 'internscenes', 'placement', 'edit', 'segment', 'p3sam', 'scene'];
 
 export default defineConfig({
   root,
