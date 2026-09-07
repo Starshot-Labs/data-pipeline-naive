@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>InternScenes Viewer</title>
+  </head>
+  <body>
+    <main id="viewer">
+      <div id="viewport"></div>
+      <header class="toolbar">
+        <label class="open-button">
+          Open export folder
+          <input id="folder" type="file" webkitdirectory multiple />
+        </label>
+        <label id="scene-picker" class="scene-picker" hidden>
+          Scene
+          <select id="scene"></select>
+        </label>
+        <button id="clear" type="button" hidden>Clear selection</button>
+      </header>
+      <div id="status" class="status">Choose an InternScenes export folder</div>
+      <div id="selection" class="selection" hidden></div>
+      <div id="speed" class="speed" hidden></div>
+      <div class="help">
+        <span><kbd>RMB</kbd> look</span>
+        <span><kbd>WASD</kbd> move</span>
+        <span><kbd>Q/E</kbd> down/up</span>
+        <span><kbd>Shift</kbd> sprint</span>
+        <span><kbd>Wheel</kbd> speed</span>
+        <span><kbd>LMB</kbd> highlight</span>
+      </div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

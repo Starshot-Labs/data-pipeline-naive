@@ -27,3 +27,7 @@ edit-results/
 .trellis-stage/
 .voxhammer-*.log
 __pycache__/
+
+data
+web/node_modules
+web/dist
