@@ -23,6 +23,7 @@ generated-pilot*/
 
 # pipeline output
 generated/
+generated-*/
 generated-1/
 generated-phrasing-test/
 dataset/
@@ -35,3 +36,5 @@ placement-logs/
 .trellis-campaign.json
 .trellis-stage/
 __pycache__/
+
+review/

@@ -151,6 +151,15 @@ export function forceOpaqueMaterials(glb) {
 
 const PLACEMENT_NODE = 'placement';
 
+/** The placement origin stored in a posed GLB, in the shared world frame. */
+export function placementOrigin({ json }) {
+  const roots = json.scenes?.[json.scene ?? 0]?.nodes ?? [];
+  if (roots.length !== 1) return null;
+  const node = json.nodes?.[roots[0]];
+  if (node?.name !== PLACEMENT_NODE) return null;
+  return new Vector3(0, 0, 0).applyMatrix4(localMatrix(node)).toArray();
+}
+
 /** Re-parent the scene under a single node carrying `trs`, baking the placement into the file. */
 export function bakeTransform(glb, { position, rotation, scale }) {
   const json = structuredClone(glb.json);

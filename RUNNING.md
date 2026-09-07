@@ -92,9 +92,45 @@ GLB path on Hugging Face — is recorded in the sample at birth. Two scripts, bo
 | `node pipeline/objaverse-pool.mjs --limit=800 --tag-limit=240 --no-licenses` | The cheap smoke version of the above.                   |
 | `node pipeline/generate-scenes.mjs --samples=50000`  | Generates scenes dealt across the six placement categories by weight — rigid ×2, soft ×1.5, the rest ×1 — with **both** objects drawn from pool assets, uid and GLB path recorded at birth. Re-running fills toward the same quotas. |
 | `node pipeline/generate-scenes.mjs --samples=12 --dry` | Prints one composed prompt per category and phrase style, calls nothing.       |
+| `node pipeline/backfill-relations.mjs --relations=60000` | Deals **new relationships across the pairs the corpus already has** — same weighted quotas, natural/stretch eligibility tiers, per-pair caps and cross-category variety, phrases written by an LLM that also judges each pairing. New samples are ordinary folders; fetch and placement treat them like any other. `--relations` is the **total** wanted, not how many to add, so re-running resumes rather than overshooting. |
+| `node pipeline/backfill-relations.mjs --relations=1500 --pairs=500` | The same, restricted to the first 500 pairs by sorted key. Deterministic, so a crashed smoke test resumes onto the same pairs and a later full run counts it as progress. |
+| `node pipeline/backfill-relations.mjs --relations=120 --dry` | Prints the eligibility table, the dealt plan and one composed prompt per category, calls nothing. |
+| `node scripts/backfill-report.mjs --source=<dir> --out=report.md` | Compiles the verification report: stage completion, category mix against target, per-pair variety, physics outcomes, re-run phrase checks, and every new phrase grouped under its pair beside the original. |
+| `node pipeline/placement-variants.mjs`               | Gives every sample the four shortened forms of its phrase — as written, without the anchor, without the placed object, without either — writing them into the sample's own `placement` / `placement_original` / `placement.txt` and keeping a copy under `datasets/raw/amendment`. Both generation paths run this themselves, so it is only needed for a corpus written before that; it skips samples that already have them and adopts an amendment already on disk instead of paying to reword it. |
+| `modal run modal/pipeline.py::verify_variants`       | Audits the four forms across staging and the published dataset.                  |
+
+### Filtering out bad placements
+
+The placement model reasons over voxel blocks a sixteenth of an object wide, so it is right
+about intent far more often than about geometry, and until now nothing checked the result.
+This renders four cardinal views from 15° above each published pair, axial top and bottom
+views, and a front cutaway with the camera-facing half of the anchor removed so containment is
+visible, then asks a vision model whether the arrangement honours the phrase. The frames are
+untextured — the anchor grey, the placed object red — because which object a surface belongs
+to is the only thing the verdict turns on, and texture is what a reader has to see past.
+
+| Command                                              | What it does                                                                    |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `modal run modal/judge.py --limit 50`                | Reruns exactly 50 randomly sampled pairs with the current renderer and prompt. It never scans verdicts into `decisions.json`; `--dry` renders only those views and calls nothing. |
+| `modal run --detach modal/judge.py --shards 24`      | The whole unjudged corpus. Shards are dealt explicit id lists, so containers never race for the same sample. |
+| `modal run modal/judge.py::collect`                  | Rebuilds `decisions.json` from the verdicts already on disk.                     |
+| `node scripts/pull-review.mjs --limit=50`            | Pulls verdicts and their seven review frames down into `review/`.               |
+| `npm run dev` → `/review.html`                       | **The point of it.** Every verdict beside the frames it was made from, drops first, with agree/disagree marks so the filter can be measured before anything is deleted on its word. |
+
+Verdicts land in `trellis-scene-vol-v2:datasets/raw/review/<id>/` — the seven frames, a
+`decision.json` holding the verdict and the model's one-line reason, and a corpus-wide
+`decisions.json` mapping every id to its verdict. **Nothing is deleted**: acting on a `false`
+stays a separate, deliberate step, which is why the frames are kept at all.
+
+A sample whose published folder holds no posed meshes is recorded as a `false` without being
+looked at (`unseen` in `decisions.json`), because there is nothing a phrase could be honoured
+by. Knobs: `JUDGE_MODEL` (`openai/gpt-5.6-luna`), `JUDGE_REASONING` (`minimal`),
+`JUDGE_CONCURRENCY` (`16`), `JUDGE_VIEW_SIZE` (`384`).
 | `node pipeline/fetch-assets.mjs`                     | Downloads every sample's recorded Objaverse GLBs from Hugging Face onto the scene volume and renders each one's reference image, cached per uid. Roles without a uid (corpora from before seeding was mandatory) are counted and skipped. |
 | `node pipeline/fetch-assets.mjs --source=<dir> [id ...]` | Same, into a local corpus's own folders — cache lands in `.objaverse-cache/`. |
 | `modal run --detach modal/pipeline.py --samples 50000` | The whole retrieval pipeline on Modal, end to end: pool → scenes → fetch + render → place → publish, with everything on the scene volume. |
+| `modal run --detach modal/pipeline.py --relations 60000` | The backfill on Modal: deal + write phrases in one container, then the usual sharded fetch → place → publish over just the samples that still need work, then the verification report onto the volume. |
+| `modal run modal/pipeline.py --relations 1500 --pairs 500` | A smoke test over 500 pairs, end to end and resumable. Its output counts toward the full run. |
 
 Diversity is dealt, not hoped for: category quotas are exact and weighted, contexts are
 shuffled and dealt within each category, and each category's relations rotate round-robin
@@ -109,6 +145,21 @@ validated in code along with seed uids, articles, neutral verbs, colour-free nam
 phrase length; anything dropped is re-planned, up to six rounds. The samples carry
 `category`, `complexity`, `detail`, `relation` and per-role `objaverse` blocks in their
 metadata; the fetch stage turns those uids into meshes and images.
+
+The backfill exists because a corpus where every pair appears once lets a trained model
+ignore the phrase — see A and B, place like the one sample it saw. It re-reads the existing
+pairs and deals each one new (category, relation, detail) assignments toward the same
+weighted quotas, so the apple that only ever sat on the right of the desk shows up on its
+left, under it, floating above it. Eligibility is tiered: **natural** is generation's own
+pool-tag test, **stretch** is one documented loosening per category (anything may rest or
+hover, containment and bonded fall back to a size test against the pair's baked sizes,
+penetrative admits blunt objects as "pushed into" only — and soft is never loosened, since
+rigid bodies do not drape). Natural capacity is spent first; the writer model also judges
+every pairing itself, and one it calls nonsense is retired for the run. Every new sample
+records `pair` and `tier`, novelty is enforced against every phrase the pair already has,
+and a pair's first backfill prefers a category it has never appeared in. Once pairs repeat,
+**split train/val by `pair`**, not by sample. Rigid also gains a `next to` relation (ground
+rest beside the anchor), which the backfill and fresh generation both deal.
 
 The reference images come from `pipeline/render.mjs`, a dependency-free software renderer:
 each asset is drawn textured from its glTF front (+Z, the exporter's 10° downward pitch)
@@ -363,6 +414,9 @@ and picked up by the next run, as before.
 | `PHYSICS_SAMPLES`                                 | `2000`                                         | Surface samples on the placed object; contact fidelity and solve cost both follow it. |
 | `PHYSICS_WORKERS`                                 | cores − 1, at most 16                          | Worker threads for in-process refines (local corpora and the Modal pipeline). |
 | `DRAPE_RES`                                       | `24`                                           | Lattice cells along the placed object's longest side in the cloth pass.       |
+| `DRAPE_BUDGET_S`                                  | `45`                                           | Wall clock the substep loop of one cloth solve may spend. Exhausting it keeps the pose and flags `drape_budget`. Rarely fires — a real solve is a few seconds. |
+| `DRAPE_SEAL_CANDIDATES` / `DRAPE_SEAL_VERTICES`   | `512` / `120000`                               | How many vertices get the exact triangle query when sealing a drape to contact, and how many are examined at all. Only the closest vertex sets the drop, so querying every one of them cost 150–250 s a sample against 0.1 s now. |
+| `PHYSICS_JOB_TIMEOUT_S`                           | `240`                                          | Backstop deadline on any pooled solve. The worker is terminated and its slot respawned, so a stuck job cannot shrink the pool. |
 | `PLACEMENT_CONTACT`                               | unset                                          | Forces the physics contact (`rest`, `lean`, `attach`, `embed`, `drape`, `none`), overriding the model's classification — the viewer's Contact picker sets it per click. |
 | `SPEC_MODEL` / `IMAGE_MODEL` / `OPENROUTER_MODEL` | see README                                     | Which model each stage uses.                         |
 | `GENERATED_DIR`                                   | `./generated`                                  | Where the local half of each sample gets written.    |
@@ -376,6 +430,9 @@ and picked up by the next run, as before.
 | `POOL_BATCH` / `POOL_CONCURRENCY`                 | `40` / `200`                                   | Captions per tagging call, and how wide tagging runs. |
 | `POOL_LICENSES`                                   | unset (allow all)                              | Exact-match license allow-list for seeds, e.g. `by,by-sa,cc0`. |
 | `SPEC_REASONING`                                  | `low`                                          | Scene-generation thinking effort. `off` only works on models that permit disabling — `gemini-3.6-flash` does not. |
+| `BACKFILL_MODEL` / `BACKFILL_REASONING`           | `SPEC_MODEL` / `SPEC_REASONING`                | The backfill phrase writer — generation's model unless told otherwise. |
+| `BACKFILL_BATCH` / `BACKFILL_CONCURRENCY`         | `16` / `200`                                   | Assignments per backfill call, and how wide the calls run. |
+| `BACKFILL_MAX_PER_PAIR`                           | `5`                                            | Backfills one pair may carry in total; per-category caps are in the script. |
 | `FETCH_CONCURRENCY`                               | `12`                                           | Samples fetching at once; each is a few MB off Hugging Face. |
 | `RENDER_SIZE`                                     | `512`                                          | Reference image edge; rendered at 2× and downsampled. |
 | `SCENE_CACHE_PREFIX` / `FETCH_CACHE`              | `datasets/raw/objaverse-cache` / `.objaverse-cache` | Where fetched GLBs and renders cache, on the volume / beside a local corpus. |

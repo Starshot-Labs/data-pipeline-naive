@@ -3,7 +3,8 @@
 // Both halves of seeded generation read this file: `objaverse-pool.mjs` tags every asset with
 // the categories it can serve (as the anchor that receives, and as the object that is
 // placed), and `generate-scenes.mjs` builds its per-category prompts from the same wording.
-// Keeping them in one place means the tagger and the generator can never drift apart on what
+// `backfill-relations.mjs` re-deals the same categories across pairs the corpus already has.
+// Keeping them in one place means the tagger and the writers can never drift apart on what
 // a category requires.
 //
 // Each category carries:
@@ -27,8 +28,10 @@ export const CATEGORIES = [
       'against an external surface of the anchor — from any direction.',
     anchor: 'stable external surfaces something can rest on, lean against, or hang from',
     placed: 'a rigid object sized to rest, lean or balance stably',
-    simple: { relations: ['on top of', 'leaning against'] },
-    complex: { relations: ['on top of', 'leaning against', 'hanging on', 'under'] },
+    // "next to" is ground rest beside the anchor — the placement prompt's "on the floor
+    // beside" case — so it asks nothing of the anchor beyond standing on the same floor.
+    simple: { relations: ['on top of', 'leaning against', 'next to'] },
+    complex: { relations: ['on top of', 'leaning against', 'hanging on', 'under', 'next to'] },
     examples: {
       bare: 'lamp on top of the dresser',
       position: 'cup sitting on top of the kitchen island in the middle',
@@ -137,6 +140,18 @@ export const CATEGORIES = [
 ];
 
 export const CATEGORY_IDS = CATEGORIES.map((category) => category.id);
+
+/**
+ * The dealt detail levels, in the words every writer prompt uses: how much a phrase says
+ * beyond the two names and the relation. Shared by `generate-scenes.mjs` and
+ * `backfill-relations.mjs` so the instruction a sample's `detail` field records means the
+ * same thing whichever writer produced it.
+ */
+export const DETAIL_LINES = {
+  bare: 'no position detail',
+  position: 'add one simple position',
+  part: 'tie it to a real part of the anchor',
+};
 
 /** What the pool tagger treats as unusable for any role, in the words the prompt uses. */
 export const JUNK =

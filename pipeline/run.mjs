@@ -25,6 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Vector3, Quaternion, Euler, MathUtils } from 'three';
 import { requestPlacement, buildPrompt, SYSTEM, CONTACTS } from './place.mjs';
 import { mapLimit, retry, widthOf } from './limit.mjs';
+import { track } from './progress.mjs';
 import * as scene from './scene.mjs';
 import * as meta from './metadata.mjs';
 
@@ -122,10 +123,17 @@ function emitGhost(before, after) {
 function physicsSummary(physics) {
   if (!physics) return 'disabled';
   if (physics.error) return `✗ ${physics.error} — baked the transforms unrefined`;
+  const timings = physics.timings
+    ? ` · ${Object.entries(physics.timings)
+        .filter(([, ms]) => ms >= 100)
+        .map(([name, ms]) => `${name} ${(ms / 1000).toFixed(1)}s`)
+        .join(' ')}`
+    : '';
   return (
     `${physics.contact} · moved ${round(physics.moved ?? 0)} · rotated ${physics.rotated_degrees ?? 0}° · ` +
     `gap ${round(physics.gap_before ?? 0)} → ${round(physics.gap_after ?? 0)}` +
-    (physics.flags?.length ? ` · flags: ${physics.flags.join(', ')}` : '')
+    (physics.flags?.length ? ` · flags: ${physics.flags.join(', ')}` : '') +
+    timings
   );
 }
 
@@ -276,7 +284,7 @@ async function runSample(sourceDir, id, { dry, force }) {
   );
 
   const { anchor, placed } = objects;
-  const phrase = sample.metadata.placement;
+  const phrase = meta.phraseOf(sample.metadata);
   console.log(
     `⋯ ${id}  anchor ${anchor.grid.dims.join('x')} → ${anchor.blocks.length} block(s)` +
     `  placed ${placed.grid.dims.join('x')} → ${placed.blocks.length} block(s)`,
@@ -394,9 +402,9 @@ async function refineSample(sourceDir, id) {
     if (process.env.PLACEMENT_GHOST === '1' && !physics.flags?.includes('drape_failed')) {
       console.log(`GHOST ${JSON.stringify({ ...transforms.placed, raw: true })}`);
     }
-    logPlacement(id, sample.metadata.placement, null, transforms, physics);
+    logPlacement(id, meta.phraseOf(sample.metadata), null, transforms, physics);
     return [
-      `▸ ${id}  "${sample.metadata.placement}"`,
+      `▸ ${id}  "${meta.phraseOf(sample.metadata)}"`,
       ...(CONTACT_OVERRIDE ? [`  contact OVERRIDDEN to ${CONTACT_OVERRIDE}`] : []),
       `  physics ${physicsSummary(physics)}`,
     ];
@@ -418,20 +426,28 @@ async function refineSample(sourceDir, id) {
   };
 
   emitGhost(transforms.placed, baked.placed);
-  logPlacement(id, sample.metadata.placement, null, baked, physics);
+  logPlacement(id, meta.phraseOf(sample.metadata), null, baked, physics);
   await bakeAndRecord(sample, id, baked, intent, physics);
 
   return [
-    `▸ ${id}  "${sample.metadata.placement}"`,
+    `▸ ${id}  "${meta.phraseOf(sample.metadata)}"`,
     ...(CONTACT_OVERRIDE ? [`  contact OVERRIDDEN to ${CONTACT_OVERRIDE}`] : []),
     `  physics ${physicsSummary(physics)}`,
   ];
 }
 
 export async function placeSamples({ sourceDir, ids, dry = false, force = false, physicsOnly = false, concurrency = PLACE_WIDTH }) {
+  const width = dry ? 1 : concurrency;
+  if (!dry) console.log(`\n  placing ${ids.length} sample(s), ${width} wide`);
+  // Progress is aggregate rather than a bar: each sample prints its own block, and the
+  // useful question during a long shard is the rate and what is left, not which one is in
+  // flight. Failures are counted into the line so a run going wrong is visible early.
+  const progress = dry ? null : track('  placed', ids.length, { indent: '' });
+  let failures = 0;
+
   // Each sample writes its own metadata before resolving, so a run cut short by rate limits
   // keeps everything that already landed and the next pass skips it.
-  const results = await mapLimit(ids, dry ? 1 : concurrency, async (id) => {
+  const results = await mapLimit(ids, width, async (id) => {
     try {
       const lines = physicsOnly
         ? await refineSample(sourceDir, id)
@@ -439,10 +455,17 @@ export async function placeSamples({ sourceDir, ids, dry = false, force = false,
       console.log(`\n${lines.join('\n')}`);
       return true;
     } catch (err) {
+      failures++;
       console.error(`\n▸ ${id}\n  ✗ ${err.message}`);
       return false;
+    } finally {
+      if (progress) {
+        if (failures) progress.note(`${failures} failed`);
+        progress.tick();
+      }
     }
   });
+  progress?.done();
 
   const placed = results.filter(Boolean).length;
   const done = `${placed}/${ids.length}`;
@@ -458,8 +481,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   // A physics-only pass wants placed samples instead — it continues from their poses.
   const ids = requested.length
     ? requested
-    : meta
-        .list(SOURCE_DIR)
+    : (await meta.listAsync(SOURCE_DIR, { label: 'reading corpus' }))
         .filter((sample) => (physicsOnly ? meta.isPlaced(sample.metadata) : meta.isMeshed(sample.metadata)))
         .map((sample) => sample.id);
   const failed = await placeSamples({

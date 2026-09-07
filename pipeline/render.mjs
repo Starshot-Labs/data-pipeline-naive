@@ -6,10 +6,12 @@
 // the math, `sharp` to decode textures and encode the PNG). "Basic rendering" is the spec:
 // textured, sun-lit, shadowed, and fast; not path-traced.
 //
-// The look: the object centred against a transparent background, seen from its glTF front
-// (+Z) with the same 10° downward pitch the manual exporter uses, lit by one directional
-// sun plus a sky ambient, with a shadow map for self-shadowing and a soft catcher disc on
-// the ground plane so the object reads as grounded rather than pasted.
+// The look: the object on solid black, centred on its own projected silhouette rather than
+// on its bounding-box centre — under perspective those are not the same point, and a capture
+// wants the pixels centred. Seen from its glTF front (+Z) with the same 10° downward pitch
+// the manual exporter uses, lit by one directional sun plus a sky ambient. The shadow map is
+// kept for self-shadowing, which is what gives the form depth; nothing is cast onto a ground
+// plane, and there is no ground plane to cast onto.
 //
 // Rendered at 2× and downsampled, which is the cheapest anti-aliasing there is.
 
@@ -17,12 +19,54 @@ import sharp from 'sharp';
 import { Matrix3, Matrix4, Vector3 } from 'three';
 import { readAccessor, localMatrix } from './glb.mjs';
 
+/**
+ * Bumped whenever a change here alters the pixels.
+ *
+ * Renders are cached per uid and copied into every sample that seeds from that asset, so
+ * without a version in the key a new renderer reaches only assets nobody has fetched before
+ * — a corpus that has already been through the fetch keeps the picture the old one made, and
+ * the change looks like it did nothing. This is what makes the cache miss on purpose.
+ *
+ * v2: camera-side fill, lifted ambient, and a black floor so no drawn pixel is pure black.
+ */
+export const RENDER_VERSION = 'v2';
+
 const SIZE = () => Number(process.env.RENDER_SIZE ?? 512);
 const FOV = (35 * Math.PI) / 180;
 const PITCH = (10 * Math.PI) / 180;
 const SHADOW_RES = 1024;
 // Down-and-inward from the upper front-left, so form shows on the front faces the camera sees.
 const SUN = new Vector3(-0.45, -1, -0.35).normalize();
+
+// Ambient sky, the sun, and a fill from the camera's side.
+//
+// The fill is the term that makes a dark object legible at all. The background is solid
+// black, so a low-albedo surface lit only by ambient lands within a couple of values of it
+// and the silhouette disappears — and a reference image whose subject cannot be made out is
+// worth nothing to the model reading it. A headlight term gives every surface the camera can
+// see some light in proportion to how squarely it faces us, which separates the object from
+// the background without flattening the sun's modelling.
+//
+// Kept just under a peak of 1 for a white surface facing both lights, so brightening the
+// darks does not clip the brights. `RENDER_EXPOSURE` is a final gain over the lot, for
+// lifting a whole corpus without re-tuning three terms against each other.
+const AMBIENT = 0.42;
+const SUN_STRENGTH = 0.55;
+const FILL = 0.24;
+// How much of the ambient a fully shadowed surface loses. Lower than it was: crushing
+// self-shadowed areas to near-black is the same legibility problem in miniature.
+const SHADOW_DEPTH = 0.7;
+const EXPOSURE = () => Number(process.env.RENDER_EXPOSURE ?? 1);
+
+// No pixel the object covers may come out pure black.
+//
+// Lighting is multiplicative, so an albedo of zero stays zero however bright the lamps get,
+// and a black surface on a black background is a hole in the silhouette rather than a dark
+// part of it. Every drawn fragment is therefore remapped from [0, 1] onto [FLOOR, 1]: white
+// stays white, the ordering of everything between is preserved, and the darkest possible
+// surface lands at a value that is unmistakably black to look at and unmistakably not the
+// background to a reader. Only fragments go through it, so the background stays a true zero.
+const BLACK_FLOOR = () => Number(process.env.RENDER_BLACK_FLOOR ?? 0.06);
 
 // Normalized integer attributes (common for COLOR_0 and compressed UVs) carry a divisor.
 const NORMALIZE = { 5120: 127, 5121: 255, 5122: 32767, 5123: 65535 };
@@ -50,7 +94,8 @@ function materialOf(json, index) {
     image: textureInfo ? (json.textures?.[textureInfo.index]?.source ?? null) : null,
     uvOffset: transform?.offset ?? [0, 0],
     uvScale: transform?.scale ?? [1, 1],
-    // BLEND is treated as a 0.5 cutout: correct sorting is not worth its cost here.
+    // BLEND is treated as a cutout against the texture's alpha: correct sorting is not worth
+    // its cost here, and the shader ignores the constant factor so glass stays visible.
     alphaCutoff: material.alphaMode && material.alphaMode !== 'OPAQUE' ? (material.alphaCutoff ?? 0.5) : null,
   };
 }
@@ -151,22 +196,17 @@ function boundsOf(draws) {
   return { min, max, center, radius };
 }
 
-const smoothstep = (lo, hi, x) => {
-  const t = Math.min(Math.max((x - lo) / (hi - lo), 0), 1);
-  return t * t * (3 - 2 * t);
-};
-
 /**
  * The sun's shadow map: scene depth rasterized in an orthographic frame looking along the
  * sun. Returns a sampler giving how shadowed a world position is, 0 (lit) to 1 (dark).
  */
-function buildShadowMap(draws, bounds, groundExtent) {
-  // An orthonormal basis around the sun direction, sized to cover object and catcher disc.
+function buildShadowMap(draws, bounds) {
+  // An orthonormal basis around the sun direction, sized to cover the object.
   const zAxis = SUN.clone().negate();
   const xAxis = new Vector3(0, 1, 0).cross(zAxis).normalize();
   if (!xAxis.lengthSq()) xAxis.set(1, 0, 0);
   const yAxis = zAxis.clone().cross(xAxis).normalize();
-  const span = Math.max(bounds.radius, groundExtent) * 2.1;
+  const span = bounds.radius * 2.1;
   const toLight = (x, y, z) => {
     const dx = x - bounds.center.x, dy = y - bounds.center.y, dz = z - bounds.center.z;
     return [
@@ -231,21 +271,72 @@ function rasterFlat(corners, width, height, plot) {
   }
 }
 
-/** Renders a parsed GLB to a PNG buffer. */
-export async function renderGLB(glb, { size = SIZE() } = {}) {
-  const draws = gatherDraws(glb);
-  const images = await decodeImages(glb, draws);
-  const bounds = boundsOf(draws);
+/**
+ * How far the object's projected silhouette sits from the middle of the frame, in NDC.
+ *
+ * Aiming the camera at the bounding-box centre does not centre the pixels: perspective makes
+ * the nearer side project larger, so the silhouette drifts off-middle. Offsetting the
+ * projection by this lands the silhouette's own bounds dead centre. It cannot push anything
+ * out of frame either — the recentred half-extent `(max - min) / 2` is never larger than the
+ * `max(|min|, |max|)` it replaces.
+ */
+function ndcOffset(draws, viewProjection) {
+  const e = viewProjection.elements;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const { positions } of draws) {
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+      const w = e[3] * x + e[7] * y + e[11] * z + e[15];
+      if (w <= 1e-6) continue;
+      const nx = (e[0] * x + e[4] * y + e[8] * z + e[12]) / w;
+      const ny = (e[1] * x + e[5] * y + e[9] * z + e[13]) / w;
+      if (nx < minX) minX = nx;
+      if (nx > maxX) maxX = nx;
+      if (ny < minY) minY = ny;
+      if (ny > maxY) maxY = ny;
+    }
+  }
+  return minX > maxX ? [0, 0] : [-(minX + maxX) / 2, -(minY + maxY) / 2];
+}
 
-  const groundY = bounds.min.y;
-  const groundExtent = bounds.radius * 1.8;
-  const shadowAt = buildShadowMap(draws, bounds, groundExtent);
+/**
+ * Every GLB's draws, with each one's textures resolved onto the draw itself.
+ *
+ * Resolving here rather than at shade time is what lets several GLBs share one frame:
+ * `material.image` indexes that GLB's own image list, so two files each mean something
+ * different by image 0 and merging their draws naively swaps their textures.
+ */
+async function prepare(glbs) {
+  const all = [];
+  for (const [objectIndex, glb] of glbs.entries()) {
+    const draws = gatherDraws(glb);
+    const images = await decodeImages(glb, draws);
+    for (const draw of draws) {
+      draw.texture = draw.material.image !== null ? (images.get(draw.material.image) ?? null) : null;
+      draw.objectIndex = objectIndex;
+      all.push(draw);
+    }
+  }
+  return all;
+}
 
-  // Camera: on the +Z side, pitched down, far enough back that the bounding sphere fits.
+/**
+ * One camera over an already-prepared scene, out to a PNG buffer.
+ *
+ * `direction` points from the subject towards the eye and needs an `up` that is not parallel
+ * to it — which is why the top and bottom views carry their own.
+ */
+function renderPass(draws, bounds, shadowAt, { direction, up, size, exposure, floor, clip = null, palette = null }) {
+  // Maps a shaded channel onto [floor, 1] and out to bytes.
+  const span = 255 * (1 - floor);
+  const base = 255 * floor;
+  const lift = (v) => base + span * (v > 1 ? 1 : v > 0 ? v : 0);
+
+  // Camera: far enough back along `direction` that the bounding sphere fits.
   const distance = (bounds.radius / Math.sin(FOV / 2)) * 1.12;
-  const eye = new Vector3(0, Math.sin(PITCH), Math.cos(PITCH)).multiplyScalar(distance).add(bounds.center);
+  const eye = direction.clone().normalize().multiplyScalar(distance).add(bounds.center);
   // three's lookAt fills in rotation only, so the eye has to be set before inverting.
-  const view = new Matrix4().lookAt(eye, bounds.center, new Vector3(0, 1, 0)).setPosition(eye).invert();
+  const view = new Matrix4().lookAt(eye, bounds.center, up).setPosition(eye).invert();
   const near = Math.max(distance - bounds.radius * 2.5, distance * 0.05);
   const far = distance + bounds.radius * 2.5;
   const projection = new Matrix4().makePerspective(
@@ -254,9 +345,13 @@ export async function renderGLB(glb, { size = SIZE() } = {}) {
     near, far,
   );
   const viewProjection = projection.clone().multiply(view);
+  const [offsetX, offsetY] = ndcOffset(draws, viewProjection);
 
   const res = size * 2;
+  // Opaque black from the start, so the downsample blends object edges against the
+  // background rather than against nothing.
   const color = new Uint8ClampedArray(res * res * 4);
+  for (let at = 3; at < color.length; at += 4) color[at] = 255;
   const zbuffer = new Float32Array(res * res).fill(Infinity);
 
   // Projects a world position to [screenX, screenY, ndcDepth, 1/w] — null when behind us.
@@ -266,34 +361,23 @@ export async function renderGLB(glb, { size = SIZE() } = {}) {
     const cz = viewProjection.elements[2] * x + viewProjection.elements[6] * y + viewProjection.elements[10] * z + viewProjection.elements[14];
     const cw = viewProjection.elements[3] * x + viewProjection.elements[7] * y + viewProjection.elements[11] * z + viewProjection.elements[15];
     if (cw <= 1e-6) return null;
-    return [((cx / cw) + 1) * 0.5 * res, (1 - (cy / cw)) * 0.5 * res, cz / cw, 1 / cw];
-  };
-
-  // --- ground catcher: a soft dark disc where the sun is blocked, alpha-only ---------
-  {
-    const e = groundExtent;
-    const cx = bounds.center.x, cz = bounds.center.z;
-    const quad = [
-      [cx - e, groundY, cz - e], [cx + e, groundY, cz - e], [cx + e, groundY, cz + e],
-      [cx - e, groundY, cz - e], [cx + e, groundY, cz + e], [cx - e, groundY, cz + e],
+    return [
+      (cx / cw + offsetX + 1) * 0.5 * res,
+      (1 - (cy / cw + offsetY)) * 0.5 * res,
+      cz / cw,
+      1 / cw,
     ];
-    for (let t = 0; t < 6; t += 3) {
-      rasterTriangle(quad.slice(t, t + 3).map(([x, y, z]) => ({ world: [x, y, z], screen: project(x, y, z) })), res, zbuffer, (at, world) => {
-        const radial = Math.hypot(world[0] - cx, world[2] - cz) / e;
-        if (radial > 1) return;
-        const darkness = shadowAt(world[0], world[1], world[2]) * 0.4 * (1 - smoothstep(0.45, 1, radial));
-        if (darkness <= 0.01) return;
-        color[at * 4 + 3] = Math.max(color[at * 4 + 3], darkness * 255);
-      });
-    }
-  }
+  };
 
   // --- the object ---------------------------------------------------------------------
   const viewDir = new Vector3();
   for (const draw of draws) {
-    const { positions, normals, uvs, colors, colorComps, indices, material } = draw;
-    const texture = material.image !== null ? images.get(material.image) : undefined;
+    const { positions, normals, uvs, colors, colorComps, indices, material, texture } = draw;
     const count = indices ? indices.length : positions.length / 3;
+    // A palette replaces the material's own colour, so the texture is only worth sampling
+    // where its alpha still decides whether the fragment exists at all.
+    const tint = palette?.[draw.objectIndex] ?? null;
+    const sampleTexture = texture && uvs && (!tint || material.alphaCutoff !== null);
 
     for (let t = 0; t + 2 < count; t += 3) {
       const verts = [];
@@ -319,10 +403,13 @@ export async function renderGLB(glb, { size = SIZE() } = {}) {
       }
 
       rasterTriangle(verts, res, zbuffer, (at, world, bary) => {
-        // Attributes, perspective-corrected by the rasterizer's barycentrics.
-        let r = material.factor[0], g = material.factor[1], b = material.factor[2], a = material.factor[3];
+        if (clip?.objectIndex === draw.objectIndex && clip.reject(world)) return false;
 
-        if (texture && uvs) {
+        // Attributes, perspective-corrected by the rasterizer's barycentrics.
+        let r = material.factor[0], g = material.factor[1], b = material.factor[2];
+        let textureAlpha = 1;
+
+        if (sampleTexture) {
           let u = 0, v = 0;
           for (let k = 0; k < 3; k++) {
             u += bary[k] * uvs[verts[k].vi * 2];
@@ -336,9 +423,9 @@ export async function renderGLB(glb, { size = SIZE() } = {}) {
           r *= texture.data[ti] / 255;
           g *= texture.data[ti + 1] / 255;
           b *= texture.data[ti + 2] / 255;
-          a *= texture.data[ti + 3] / 255;
+          textureAlpha = texture.data[ti + 3] / 255;
         }
-        if (colors) {
+        if (colors && !tint) {
           let cr = 0, cg = 0, cb = 0;
           for (let k = 0; k < 3; k++) {
             cr += bary[k] * colors[verts[k].vi * colorComps];
@@ -347,7 +434,12 @@ export async function renderGLB(glb, { size = SIZE() } = {}) {
           }
           r *= cr; g *= cg; b *= cb;
         }
-        if (material.alphaCutoff !== null && a < material.alphaCutoff) return false;
+        // Only a texture's alpha carves a shape. A material-wide alpha is glass, and a glass
+        // bowl held to the same 0.5 test loses every fragment it has: the object disappears
+        // rather than being seen through, which is indistinguishable from never being placed.
+        if (material.alphaCutoff !== null && textureAlpha < material.alphaCutoff) return false;
+        // After the cutout test, so a leaf card keeps its shape and loses only its colour.
+        if (tint) { r = tint[0]; g = tint[1]; b = tint[2]; }
 
         let nx = fnx, ny = fny, nz = fnz;
         if (normals) {
@@ -364,13 +456,16 @@ export async function renderGLB(glb, { size = SIZE() } = {}) {
 
         const diffuse = Math.max(-(nx * SUN.x + ny * SUN.y + nz * SUN.z) / nlen, 0);
         const sky = 0.5 + (0.5 * ny) / nlen;
-        const lit = 1 - 0.85 * shadowAt(world[0], world[1], world[2]);
-        const shade = 0.32 * (0.65 + 0.35 * sky) + 0.78 * diffuse * lit;
+        const lit = 1 - SHADOW_DEPTH * shadowAt(world[0], world[1], world[2]);
+        // `viewDir` already points at the eye and is not unit length.
+        const vlen = Math.hypot(viewDir.x, viewDir.y, viewDir.z) || 1;
+        const facing = Math.max((nx * viewDir.x + ny * viewDir.y + nz * viewDir.z) / (nlen * vlen), 0);
+        const shade =
+          (AMBIENT * (0.65 + 0.35 * sky) + SUN_STRENGTH * diffuse * lit + FILL * facing) * exposure;
 
-        color[at * 4] = r * shade * 255;
-        color[at * 4 + 1] = g * shade * 255;
-        color[at * 4 + 2] = b * shade * 255;
-        color[at * 4 + 3] = 255;
+        color[at * 4] = lift(r * shade);
+        color[at * 4 + 1] = lift(g * shade);
+        color[at * 4 + 2] = lift(b * shade);
         return true;
       });
     }
@@ -378,8 +473,114 @@ export async function renderGLB(glb, { size = SIZE() } = {}) {
 
   return sharp(Buffer.from(color.buffer), { raw: { width: res, height: res, channels: 4 } })
     .resize(size, size, { kernel: 'lanczos3' })
+    // Three channels out: the background is black, not absent, and an alpha channel that is
+    // 255 everywhere only invites something downstream to composite against it.
+    .removeAlpha()
     .png()
     .toBuffer();
+}
+
+/** Renders a parsed GLB to a PNG buffer, from its glTF front with the exporter's pitch. */
+export async function renderGLB(glb, { size = SIZE(), exposure = EXPOSURE(), floor = BLACK_FLOOR() } = {}) {
+  const draws = await prepare([glb]);
+  const bounds = boundsOf(draws);
+  return renderPass(draws, bounds, buildShadowMap(draws, bounds), {
+    direction: new Vector3(0, Math.sin(PITCH), Math.cos(PITCH)),
+    up: new Vector3(0, 1, 0),
+    size,
+    exposure,
+    floor,
+  });
+}
+
+/**
+ * Six exterior review views: four cardinal cameras elevated 15° above the scene centre,
+ * then unchanged axial top and bottom cameras. The anchor cutaway is added separately.
+ */
+const CARDINAL_ELEVATION = (15 * Math.PI) / 180;
+const CARDINAL_HORIZONTAL = Math.cos(CARDINAL_ELEVATION);
+const CARDINAL_VERTICAL = Math.sin(CARDINAL_ELEVATION);
+
+export const VIEWS = [
+  { name: 'front', direction: [0, CARDINAL_VERTICAL, CARDINAL_HORIZONTAL], up: [0, 1, 0] },
+  { name: 'right', direction: [CARDINAL_HORIZONTAL, CARDINAL_VERTICAL, 0], up: [0, 1, 0] },
+  { name: 'back', direction: [0, CARDINAL_VERTICAL, -CARDINAL_HORIZONTAL], up: [0, 1, 0] },
+  { name: 'left', direction: [-CARDINAL_HORIZONTAL, CARDINAL_VERTICAL, 0], up: [0, 1, 0] },
+  { name: 'top', direction: [0, 1, 0], up: [0, 0, -1] },
+  { name: 'bottom', direction: [0, -1, 0], up: [0, 0, 1] },
+];
+
+/**
+ * Untextured review colours: a neutral anchor and a red placed object.
+ *
+ * Texture is what a reader has to see past to answer the only question being asked — which
+ * of the two objects is which, and where one sits against the other. Two flat albedos leave
+ * the lighting to carry the form and make the boundary between them unambiguous even where
+ * the meshes touch, interpenetrate or share a palette.
+ */
+export const REVIEW_PALETTE = [
+  [0.74, 0.75, 0.78],
+  [0.92, 0.09, 0.09],
+];
+
+/**
+ * Several posed GLBs in one frame, rendered from each of `views`.
+ *
+ * The meshes carry their own placement, so nothing is transformed here — what the images show
+ * is what the files say, which is the whole point of using them to check the files. Bounds and
+ * the shadow map are computed once over the union: framing every view identically is what
+ * makes the exterior views and cutaway comparable, and the shadow map depends only on
+ * geometry and the sun.
+ */
+export async function renderViews(
+  glbs,
+  { size = SIZE(), exposure = EXPOSURE(), floor = BLACK_FLOOR(), views = VIEWS, palette = REVIEW_PALETTE } = {},
+) {
+  const draws = await prepare(glbs);
+  const bounds = boundsOf(draws);
+  const shadowAt = buildShadowMap(draws, bounds);
+
+  const out = [];
+  for (const view of views) {
+    out.push({
+      name: view.name,
+      png: await renderPass(draws, bounds, shadowAt, {
+        direction: new Vector3().fromArray(view.direction),
+        up: new Vector3().fromArray(view.up),
+        size,
+        exposure,
+        floor,
+        palette,
+      }),
+    });
+  }
+
+  if (glbs.length > 1) {
+    const direction = new Vector3().fromArray(VIEWS[0].direction).normalize();
+    const anchorCenter = boundsOf(draws.filter((draw) => draw.objectIndex === 0)).center;
+    out.push({
+      name: 'anchor-cutaway',
+      png: await renderPass(draws, bounds, shadowAt, {
+        direction,
+        up: new Vector3().fromArray(VIEWS[0].up),
+        size,
+        exposure,
+        floor,
+        palette,
+        // Remove the camera-facing half of A. B stays intact, exposing containment while
+        // preserving the same front framing as image 1.
+        clip: {
+          objectIndex: 0,
+          reject: ([x, y, z]) =>
+            (x - anchorCenter.x) * direction.x +
+              (y - anchorCenter.y) * direction.y +
+              (z - anchorCenter.z) * direction.z >
+            0,
+        },
+      }),
+    });
+  }
+  return out;
 }
 
 /**

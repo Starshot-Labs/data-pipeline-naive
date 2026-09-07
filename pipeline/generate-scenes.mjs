@@ -35,7 +35,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chatJSON } from './openrouter.mjs';
 import { mapLimit, retry, widthOf } from './limit.mjs';
-import { CATEGORIES, CONTEXTS } from './scene-spec.mjs';
+import { CATEGORIES, CONTEXTS, DETAIL_LINES } from './scene-spec.mjs';
 import * as meta from './metadata.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -255,18 +255,12 @@ Rules:
 
 const assetLine = (asset) => `- ${asset.uid} — ${asset.caption.slice(0, 220)}`;
 
-const LEVEL_LINE = {
-  bare: 'no position detail',
-  position: 'add one simple position',
-  part: 'tie it to a real part of the anchor',
-};
-
 function userFor({ context, relations, levels }, anchors, placed, avoid) {
   return [
     `Compose ${relations.length} sample(s) set in a ${context}.`,
     '',
     'Assigned relations, one per sample in order:',
-    ...relations.map((relation, i) => `${i + 1}. ${relation} — ${LEVEL_LINE[levels[i]]}`),
+    ...relations.map((relation, i) => `${i + 1}. ${relation} — ${DETAIL_LINES[levels[i]]}`),
     '',
     'Anchor assets — choose a different one for each sample:',
     ...anchors.map(assetLine),
@@ -375,7 +369,7 @@ function writeSample(sample, request, relation, level, offered) {
   };
 
   meta.write(dir, metadata);
-  meta.writeAtomic(path.join(dir, 'placement.txt'), metadata.placement);
+  meta.writeAtomic(path.join(dir, 'placement.txt'), meta.placementText(metadata));
   return metadata;
 }
 
@@ -394,7 +388,7 @@ async function generate(target) {
   // Existing samples count toward quotas and seed the dedup set, so re-running only fills.
   // A sample from before the styles were split carries no `complexity` and counts as
   // complex, which is the style it was written in.
-  const existing = meta.list(GENERATED_DIR).map((sample) => sample.metadata);
+  const existing = (await meta.listAsync(GENERATED_DIR, { label: 'reading corpus' })).map((s) => s.metadata);
   const created = {};
   for (const c of CATEGORIES) for (const cx of COMPLEXITIES) created[keyOf(c.id, cx)] = 0;
   for (const m of existing) {
@@ -412,7 +406,7 @@ async function generate(target) {
       anchorName: m.anchor.name,
       placedName: m.placed.name,
       relation: m.relation ?? '',
-      placement: m.placement ?? '',
+      placement: meta.phraseOf(m),
     })) seen.add(key);
   }
 
@@ -523,7 +517,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
 
   if (!DRY) {
     const counts = Object.fromEntries(CATEGORIES.map((c) => [c.id, { simple: 0, complex: 0 }]));
-    for (const sample of meta.list(GENERATED_DIR)) {
+    for (const sample of await meta.listAsync(GENERATED_DIR, { label: 'counting corpus' })) {
       const per = counts[sample.metadata.category];
       if (per) per[sample.metadata.complexity === 'simple' ? 'simple' : 'complex']++;
     }

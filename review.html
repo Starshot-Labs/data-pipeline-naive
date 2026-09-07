@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Placement review — judging the judge</title>
+    <style>
+      :root {
+        --bg: #0b0b0d;
+        --panel: #141418;
+        --line: #26262e;
+        --text: #e7e7ea;
+        --dim: #8b8b96;
+        --keep: #3fb950;
+        --drop: #f85149;
+        --accent: #58a6ff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 12px 20px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+      }
+      h1 { font-size: 15px; margin: 0; font-weight: 600; }
+      .spacer { flex: 1; }
+      .stat { color: var(--dim); font-variant-numeric: tabular-nums; }
+      .stat b { color: var(--text); }
+      button {
+        font: inherit;
+        color: var(--text);
+        background: #1d1d24;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 5px 11px;
+        cursor: pointer;
+      }
+      button:hover { border-color: #3a3a46; }
+      button.on { background: var(--accent); border-color: var(--accent); color: #08080a; font-weight: 600; }
+      main { padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+      .sample {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .head { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; padding: 12px 14px; }
+      .verdict { font-weight: 700; letter-spacing: 0.02em; }
+      .verdict.keep { color: var(--keep); }
+      .verdict.drop { color: var(--drop); }
+      .phrase { font-size: 15px; }
+      .id { color: var(--dim); font-family: ui-monospace, monospace; font-size: 11px; }
+      .reason { padding: 0 14px 12px; color: var(--dim); }
+      .frames { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--line); }
+      .frame { position: relative; background: #000; }
+      .frame img { display: block; width: 100%; height: auto; }
+      .frame span {
+        position: absolute; left: 4px; top: 3px;
+        font-size: 10px; color: #9aa; background: rgba(0,0,0,.55);
+        padding: 1px 5px; border-radius: 3px;
+      }
+      .unseen { padding: 24px 14px; color: var(--dim); font-style: italic; }
+      .agree { display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--line); }
+      .agree .label { color: var(--dim); margin-right: 4px; }
+      .marked-ok { box-shadow: inset 3px 0 0 var(--keep); }
+      .marked-bad { box-shadow: inset 3px 0 0 var(--drop); }
+      @media (max-width: 1100px) { .frames { grid-template-columns: repeat(3, 1fr); } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Placement review</h1>
+      <div id="filters"></div>
+      <div class="spacer"></div>
+      <div class="stat" id="stats"></div>
+      <button id="export">Copy disagreements</button>
+    </header>
+    <main id="list"></main>
+    <script type="module" src="/src/review.ts"></script>
+  </body>
+</html>

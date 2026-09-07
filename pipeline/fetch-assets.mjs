@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mapLimit, widthOf } from './limit.mjs';
+import { track } from './progress.mjs';
 import * as scene from './scene.mjs';
 import * as meta from './metadata.mjs';
 
@@ -51,7 +52,8 @@ function jobsFor(metadata) {
 }
 
 export async function fetchSamples({ ids, concurrency = WIDTH } = {}) {
-  const samples = meta.list(SOURCE_DIR).filter((sample) => !ids?.length || ids.includes(sample.id));
+  const wanted = ids?.length ? new Set(ids) : null;
+  const samples = await meta.listAsync(SOURCE_DIR, { only: wanted, label: 'reading corpus' });
 
   let unseededRoles = 0;
   const pending = [];
@@ -66,31 +68,40 @@ export async function fetchSamples({ ids, concurrency = WIDTH } = {}) {
   if (!pending.length) return 0;
 
   let failed = 0;
+  const progress = track('fetching', pending.length);
   await mapLimit(pending, concurrency, async (sample) => {
     try {
       const { fetched, errors } = await scene.fetchAssets(sample.id, sample.jobs, LOCAL_SOURCE ? sample.dir : undefined);
 
       const metadata = meta.read(sample.dir);
+      // Both roles come back textured here, unlike a farm campaign's geometry lane: a seeded
+      // asset is downloaded whole, so the anchor arrives with its own materials too.
       for (const [role, files] of Object.entries(fetched)) {
-        metadata[role].mesh = files.mesh;
         metadata[role].image = files.image;
+        metadata[role].mesh = files.mesh;
         metadata[role].textured = true;
       }
       meta.write(sample.dir, metadata);
 
       for (const { role, uid, error } of errors) {
         failed++;
+        progress.clear();
         console.error(`  ✗ ${sample.id} [${role}] ${uid}: ${error}`);
       }
-      const done = Object.keys(fetched);
-      if (done.length) console.log(`  + ${sample.id}  ${done.join(' + ')}`);
     } catch (err) {
       failed++;
+      progress.clear();
       console.error(`  ✗ ${sample.id}: ${err.message}`);
+    } finally {
+      if (failed) progress.note(`${failed} failed`);
+      progress.tick();
     }
   });
+  progress.done();
 
-  const meshed = meta.list(SOURCE_DIR).filter((sample) => meta.isMeshed(sample.metadata)).length;
+  const meshed = (await meta.listAsync(SOURCE_DIR, { only: wanted, label: 'verifying meshes' })).filter((sample) =>
+    meta.isMeshed(sample.metadata),
+  ).length;
   console.log(`\n${meshed} sample(s) now have both meshes.`);
   if (failed) console.log(`${failed} fetch(es) failed — re-running retries them.`);
   return failed;

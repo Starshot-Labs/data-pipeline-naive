@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mapLimit, retry, widthOf } from './limit.mjs';
+import { track, timed } from './progress.mjs';
 import * as scene from './scene.mjs';
 import * as meta from './metadata.mjs';
 
@@ -30,23 +31,84 @@ const PUBLISH_WIDTH = widthOf('PUBLISH_CONCURRENCY', 50);
 // amortise the round trip and the volume commit, both of which cost most of a second.
 const PUBLISH_BATCH = Number(process.env.PUBLISH_BATCH ?? 250);
 
+// Serialised through `meta` rather than here, so the published file is byte-for-byte the one
+// sitting in the sample folder — same key order, same trailing newline.
 const payloadOf = (sample) => ({
   sample: sample.id,
   files: {
-    'metadata.json': `${JSON.stringify(sample.metadata, null, 2)}\n`,
-    'placement.txt': sample.metadata.placement,
+    'metadata.json': meta.serialize(sample.metadata),
+    'placement.txt': meta.placementText(sample.metadata),
   },
 });
 
+/**
+ * The placed samples of a corpus, read concurrently.
+ *
+ * `meta.list` reads each metadata.json with a synchronous `readFileSync`, which is fine for
+ * hundreds and ruinous for tens of thousands: none of them are in a fresh container's cache,
+ * so it becomes that many serial round trips to the volume — twenty thousand of them is tens
+ * of minutes before the first byte gets written, with nothing printed the whole time.
+ * Overlapping the waits is the entire difference.
+ */
+async function placedSamples(root, concurrency) {
+  if (!fs.existsSync(root)) return [];
+  const names = fs
+    .readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+
+  const progress = track('reading corpus', names.length);
+  const broken = [];
+  const samples = await mapLimit(names, concurrency, async (name) => {
+    const dir = path.join(root, name);
+    let raw;
+    try {
+      raw = await fs.promises.readFile(path.join(dir, meta.FILE), 'utf8');
+    } catch (err) {
+      // A folder without metadata.json is not a sample, which is what meta.list's own
+      // directory filter decided.
+      if (err.code !== 'ENOENT') broken.push(`${name}: ${err.message}`);
+      progress.tick();
+      return null;
+    } finally {
+      progress.tick();
+    }
+
+    try {
+      const metadata = JSON.parse(raw);
+      return meta.isPlaced(metadata) ? { id: name, dir, metadata } : null;
+    } catch (err) {
+      // One unreadable sample must not cost the publish of every other one. A container
+      // killed mid-write can leave a zero-filled metadata.json behind, and letting that
+      // throw took down a run that had 57,590 samples ready to go. It is a sample to fix,
+      // named here so it can be, not a reason to stop.
+      broken.push(`${name}: ${err.message}`);
+      return null;
+    }
+  });
+  progress.done();
+
+  return { samples: samples.filter(Boolean), broken };
+}
+
 /** Publishes every placed sample not already up; returns how many went. */
 export async function uploadSamples({ force = false } = {}) {
-  const placed = meta.list(GENERATED_DIR).filter((sample) => meta.isPlaced(sample.metadata));
+  const { samples: placed, broken } = await placedSamples(GENERATED_DIR, PUBLISH_WIDTH);
+  if (broken.length) {
+    console.log(`  ${broken.length} sample(s) could not be read and are skipped:`);
+    for (const line of broken.slice(0, 10)) console.log(`    ✗ ${line}`);
+    if (broken.length > 10) console.log(`    … and ${broken.length - 10} more`);
+  }
   if (!placed.length) {
     console.log('  nothing placed to publish');
     return 0;
   }
+  console.log(`  ${placed.length} placed sample(s) in the corpus`);
 
-  const already = force ? new Set() : await scene.published();
+  // Skipping the skip-set is worth it when almost nothing is up yet: computing it walks every
+  // published folder, and re-writing two small files over themselves costs less than finding
+  // out it was unnecessary.
+  const already = force ? new Set() : await timed('walked published folders', () => scene.published());
   const pending = placed.filter((sample) => !already.has(sample.id));
   if (!pending.length) {
     console.log(`  all ${placed.length} placed sample(s) are already up`);
@@ -58,15 +120,21 @@ export async function uploadSamples({ force = false } = {}) {
 
   // A batch fails or lands together, which is the trade for one commit instead of hundreds.
   // Nothing is lost either way: an unpublished sample keeps its metadata and goes next run.
+  console.log(`  publishing ${pending.length} sample(s) in ${batches.length} batch(es), ${PUBLISH_WIDTH} wide`);
+  const progress = track('publishing', pending.length);
   const results = await mapLimit(batches, PUBLISH_WIDTH, async (batch) => {
     try {
       const { published } = await retry(() => scene.publish(batch.map(payloadOf)));
+      progress.tick(batch.length);
       return published.length;
     } catch (err) {
+      progress.clear();
       console.error(`    ✗ ${batch.length} sample(s) from ${batch[0].id}: ${err.message}`);
+      progress.tick(batch.length);
       return 0;
     }
   });
+  progress.done();
 
   const done = results.reduce((total, n) => total + n, 0);
   console.log(`  ✓ ${done}/${pending.length} sample(s) published in ${batches.length} call(s)`);

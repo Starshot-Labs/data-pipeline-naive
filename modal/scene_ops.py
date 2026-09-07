@@ -52,8 +52,9 @@ scene = modal.Volume.from_name("trellis-scene-vol-v2")
 
 VOLUMES = {"/farm-out": farm_out, "/farm-in": farm_in, "/scene": scene}
 
-# Kept in step with the defaults in ops.mjs; only the file route needs it on this side.
+# Kept in step with the defaults in ops.mjs; only the file routes need them on this side.
 PUBLISH_PREFIX = "datasets/raw/stage1"
+REVIEW_PREFIX = "datasets/raw/review"
 
 # What each command touches, which is what decides when to reload and when to commit.
 READS_FARM = {"assets", "collect"}
@@ -120,6 +121,31 @@ def web():
             if not target.is_file():
                 raise HTTPException(status_code=404, detail=f"no {name} for {sample}")
             return FileResponse(target)
+
+    @api.get("/review")
+    def review_index():
+        """Every sample that has a verdict, so a reviewer can pull just those."""
+        with _volumes:
+            scene.reload()
+            root = Path("/scene") / REVIEW_PREFIX
+            if not root.is_dir():
+                return {"ids": []}
+            return {"ids": sorted(p.name for p in root.iterdir() if (p / "decision.json").is_file())}
+
+    @api.get("/review/{sample}/{name}")
+    def review_file(sample: str, name: str):
+        """One review file — a frame or the verdict made from it.
+
+        Deliberately without the reload-under-a-lock that `/file` does: a review folder is
+        written once and never revised, and a sample is seven files, so reloading the whole
+        volume for each of them serialises a bulk pull behind itself until the container
+        starts answering 500s. The index above reloads, which is enough to make new verdicts
+        visible before anything asks for their frames.
+        """
+        target = Path("/scene") / REVIEW_PREFIX / Path(sample).name / Path(name).name
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no {name} for {sample}")
+        return FileResponse(target)
 
     @api.post("/{command}")
     async def dispatch(command: str, payload: dict | None = None):

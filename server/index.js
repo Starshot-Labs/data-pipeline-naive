@@ -11,6 +11,9 @@ const ROOT = path.resolve(__dirname, '..');
 const MODELS_DIR = process.env.MODELS_DIR ? path.resolve(process.env.MODELS_DIR) : path.join(ROOT, 'models');
 const DATASET_DIR = process.env.DATASET_DIR ? path.resolve(process.env.DATASET_DIR) : path.join(ROOT, 'dataset');
 const GENERATED_DIR = path.resolve(ROOT, process.env.GENERATED_DIR ?? 'generated');
+// Verdicts pulled down from the volume: one folder per sample holding its review frames and
+// the decision made from them. See pipeline/judge.mjs.
+const REVIEW_DIR = path.resolve(ROOT, process.env.REVIEW_DIR ?? 'review');
 const DIST_DIR = path.join(ROOT, 'dist');
 const PORT = Number(process.env.PORT ?? 3000);
 
@@ -85,6 +88,34 @@ app.get('/api/models', (_req, res) => {
 app.use('/models', express.static(MODELS_DIR));
 app.use('/dataset', express.static(DATASET_DIR));
 app.use('/generated', express.static(GENERATED_DIR));
+app.use('/review', express.static(REVIEW_DIR));
+
+/**
+ * Every verdict the review folder holds, newest first, with the frames each was made from.
+ *
+ * Read off disk rather than from decisions.json so a partially-pulled folder still opens —
+ * reviewing the first hundred while the rest download is the normal way to use this.
+ */
+app.get('/api/review', (_req, res) => {
+  if (!fs.existsSync(REVIEW_DIR)) return res.json({ dir: REVIEW_DIR, samples: [] });
+  const samples = [];
+  for (const entry of fs.readdirSync(REVIEW_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(REVIEW_DIR, entry.name, 'decision.json');
+    if (!fs.existsSync(file)) continue;
+    try {
+      const decision = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const views = fs
+        .readdirSync(path.join(REVIEW_DIR, entry.name))
+        .filter((name) => name.endsWith('.png'))
+        .sort();
+      samples.push({ ...decision, id: decision.id ?? entry.name, views });
+    } catch {
+      // A decision.json still being written is not an error worth failing the page over.
+    }
+  }
+  res.json({ dir: REVIEW_DIR, samples });
+});
 
 // A posed mesh is read out of the sample's own folder when it is there, and pulled back from
 // the scene volume when it is not — baking writes to the volume, so whether a sample's GLBs

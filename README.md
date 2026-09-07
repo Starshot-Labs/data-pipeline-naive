@@ -243,7 +243,10 @@ since re-issuing it buys the same verdict.
     | `bare`     | `<placement>`                   | leaning against the front face, near the right edge                         |
 
     The two that omit the anchor lean on generic parts — "the top surface", "the left side" —
-    rather than naming it. Which one a sample used is recorded as `phrasing`.
+    rather than naming it. Which one a sample used is recorded as `phrasing`, a field only
+    this flow writes: seeded generation always names both objects and varies how much detail
+    the phrase carries instead, so `phrasing` is no longer part of the sample format
+    ([METADATA.md](METADATA.md)).
     The forms are dealt round-robin rather than drawn per request, because drawing
     independently leaves the mix to luck: a ten-sample run came out eight `anchor` and one
     each of two others. Dealt out, twelve samples give exactly three of each.

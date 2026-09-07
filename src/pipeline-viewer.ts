@@ -17,12 +17,19 @@ interface Part {
   size: Vec3;
 }
 
-/** A placed sample's metadata.json — see METADATA.md. */
+/** A placed sample's metadata.json — see METADATA.md. The four fields describing what kind
+ *  of placement it is are optional because a corpus from the invented-object flow has none:
+ *  that one varied how the phrase named the objects instead. */
 interface Sample {
   id: string;
   context: string;
-  phrasing: string;
-  placement: string;
+  category?: string;
+  complexity?: string;
+  relation?: string;
+  detail?: string;
+  /** The phrase as written, or that phrase followed by its three shortened forms. */
+  placement: string | string[];
+  placement_original?: string;
   anchor: Part;
   placed: Part;
   combined_size: Vec3;
@@ -457,8 +464,20 @@ function separateLayers(): void {
 
 const dims = (size: Vec3) => size.map((v) => v.toFixed(3)).join(' × ');
 
+/** The phrase as written. Samples carry either a bare string or that string followed by its
+ *  three shortened forms, and both shapes are permanently valid on disk. */
+const phraseOf = (sample: Sample): string =>
+  sample.placement_original ?? (Array.isArray(sample.placement) ? sample.placement[0] : sample.placement);
+
+/** The shortened forms, when a sample has them. */
+const variantsOf = (sample: Sample): string[] =>
+  Array.isArray(sample.placement) ? sample.placement.slice(1) : [];
+
 function renderInfo(sample: Sample, base: string): void {
-  dom.placement.textContent = `"${sample.placement}"`;
+  const shortened = variantsOf(sample);
+  dom.placement.textContent = shortened.length
+    ? `"${phraseOf(sample)}"  ·  ${shortened.map((v) => `"${v}"`).join('  ·  ')}`
+    : `"${phraseOf(sample)}"`;
 
   dom.selInfo.textContent = '';
   for (const layer of LAYERS) {
@@ -469,9 +488,10 @@ function renderInfo(sample: Sample, base: string): void {
   }
 
   dom.numbers.textContent = '';
+  const kind = [sample.category, sample.relation, sample.detail].filter(Boolean).join(' · ');
   const entries: [string, string][] = [
     ['context', sample.context],
-    ['phrasing', sample.phrasing],
+    ...(kind ? ([['kind', kind]] as [string, string][]) : []),
     ['anchor size', dims(sample.anchor.size)],
     ['placed size', dims(sample.placed.size)],
     ['combined', dims(sample.combined_size)],

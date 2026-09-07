@@ -85,6 +85,23 @@ check('attach reported its contact', mounted.report.contact === 'attach');
 check('rest met the top', Math.abs(rested.placed.position[1] - 0.548) < 0.008, rested.placed.position[1].toFixed(4));
 check('rest kept its footing', Math.abs(rested.placed.position[0]) < 0.01, rested.placed.position[0].toFixed(4));
 
+// A solve that outruns its deadline has to be cancelled and the slot handed a fresh worker,
+// or one pathological mesh shrinks the pool for the rest of the run. The deadline is read
+// per dispatch, so setting it either side of a submit exercises both paths in one process.
+console.log('\n-- pool: a job past its deadline is cancelled and the slot recovers');
+process.env.PHYSICS_JOB_TIMEOUT_S = '0.001';
+let cancelled = null;
+try {
+  await refine(DIR, payload([0, 0.58, 0], 'rest', [0, 0, 0]));
+} catch (err) {
+  cancelled = err.message;
+}
+check('the job was cancelled', /exceeded .* and was cancelled/.test(cancelled ?? ''), cancelled ?? 'resolved');
+
+process.env.PHYSICS_JOB_TIMEOUT_S = '240';
+const after = await refine(DIR, payload([0, 0.58, 0], 'rest', [0, 0, 0]));
+check('the pool still works afterwards', Math.abs(after.placed.position[1] - 0.548) < 0.008, after.placed.position[1].toFixed(4));
+
 fs.rmSync(DIR, { recursive: true, force: true });
 console.log(failures ? `${failures} check(s) FAILED` : 'all checks passed');
 process.exitCode = failures ? 1 : 0;

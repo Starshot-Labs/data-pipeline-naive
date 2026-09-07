@@ -25,8 +25,9 @@ import { parseGLB, serializeGLB, sceneTriangles, bakeTransform, deformGLB, extra
 import { voxelize, toBlocks } from './voxelize.mjs';
 import { refineDir } from './physics.mjs';
 import { buildDrape } from './cloth.mjs';
-import { renderGLB } from './render.mjs';
-import { writeAtomic } from './metadata.mjs';
+import { renderGLB, RENDER_VERSION } from './render.mjs';
+import { writeAtomic, writeAtomicAsync } from './metadata.mjs';
+import { mapLimit } from './limit.mjs';
 
 const FARM_OUT = process.env.FARM_OUT_DIR ?? '/farm-out';
 const FARM_IN = process.env.FARM_IN_DIR ?? '/farm-in';
@@ -296,7 +297,10 @@ export async function fetchInto(destination, objects, cacheDir) {
       const cachedGlb = path.join(cacheDir, `${uid}.glb`);
       if (!fs.existsSync(cachedGlb)) await downloadTo(cachedGlb, HF_GLB(glb));
 
-      const cachedPng = path.join(cacheDir, `${uid}.png`);
+      // The GLB is keyed on the uid alone — the download never changes. The render is keyed
+      // on the renderer too, so a lighting change re-renders instead of copying the picture
+      // the previous version made.
+      const cachedPng = path.join(cacheDir, `${uid}.${RENDER_VERSION}.png`);
       if (!fs.existsSync(cachedPng)) writeAtomic(cachedPng, await renderGLB(readGlb(cachedGlb)));
 
       writeAtomic(path.join(destination, `${stem}.glb`), fs.readFileSync(cachedGlb));
@@ -446,25 +450,37 @@ export const COMMANDS = {
    * kilobytes, while the round trip and the volume commit around them are most of a second.
    * One call pays that once for the whole batch rather than once per sample.
    */
-  publish({ samples }) {
+  /**
+   * Writes each sample's small text files into its published folder.
+   *
+   * Concurrent, and it has to be: these are network-volume round trips, so doing them
+   * synchronously blocks the event loop and collapses the caller's batching into one
+   * serial queue however wide it thinks it is running. On a corpus of eighty thousand that
+   * was the difference between minutes and a day and a half.
+   */
+  async publish({ samples }) {
     const published = [];
-    for (const { sample, files } of samples) {
+    await mapLimit(samples, 32, async ({ sample, files }) => {
       const destination = publishDir(sample);
-      fs.mkdirSync(destination, { recursive: true });
-      for (const [name, contents] of Object.entries(files)) {
-        writeAtomic(path.join(destination, path.basename(name)), contents);
-      }
+      await fs.promises.mkdir(destination, { recursive: true });
+      await Promise.all(
+        Object.entries(files).map(([name, contents]) =>
+          writeAtomicAsync(path.join(destination, path.basename(name)), contents),
+        ),
+      );
       published.push(sample);
-    }
+    });
     return { published };
   },
 
-  /** Samples already carrying a metadata.json, which is what makes one finished. */
-  published() {
+  /** Samples already carrying a metadata.json, which is what makes one finished. Each test
+   *  is a volume round trip, so they overlap rather than queueing behind one another. */
+  async published() {
     const root = path.join(SCENE, PUBLISH);
-    return {
-      ids: listDir(root).filter((name) => fs.existsSync(path.join(root, name, 'metadata.json'))),
-    };
+    const found = await mapLimit(listDir(root), 64, async (name) =>
+      fs.promises.access(path.join(root, name, 'metadata.json')).then(() => name, () => null),
+    );
+    return { ids: found.filter(Boolean) };
   },
 };
 

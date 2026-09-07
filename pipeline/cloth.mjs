@@ -46,6 +46,23 @@ const SLEEP_STEPS = 60;
 const WARMUP = 30;
 const CONTACT_BIAS = 0.002;
 
+// A wall-clock ceiling on one solve, checked every `BUDGET_EVERY` substeps so the clock
+// read costs nothing measurable.
+//
+// The substep cap alone does not bound the time: cost per substep scales with the lattice
+// and the constraint count, so a large soft object that never reaches the sleep threshold
+// spends all 3000 of them, and a handful of those held twelve shards open for half an hour
+// after the other 1490 samples had finished. Cloth that has passed warmup and is still
+// falling is a partial drape rather than a wrong one — the pre-drop already put it in
+// contact and the seal below closes the remaining gap — so exhausting the budget keeps the
+// pose and flags it, and only a numeric blow-up still hands back the rigid fallback.
+const budgetMs = () => Number(process.env.DRAPE_BUDGET_S ?? 45) * 1000;
+const BUDGET_EVERY = 16;
+
+// Seal sizing — see the seal itself for why these bound anything at all.
+const SEAL_CANDIDATES = Number(process.env.DRAPE_SEAL_CANDIDATES ?? 512);
+const SEAL_MAX_VERTICES = Number(process.env.DRAPE_SEAL_VERTICES ?? 120000);
+
 const qRotate = (q, x, y, z, out) => {
   const tx = 2 * (q[1] * z - q[2] * y);
   const ty = 2 * (q[2] * x - q[0] * z);
@@ -63,6 +80,15 @@ const qRotate = (q, x, y, z, out) => {
  */
 export function buildDrape({ anchorTriangles, placedTriangles, anchor, placed, options = {} }) {
   const report = { contact: 'drape', flags: [] };
+  // Phase timings, so a slow drape says which phase was slow instead of just being slow.
+  // Cheap enough to always carry; the caller decides whether to surface them.
+  const timings = {};
+  let mark = Date.now();
+  const phase = (name) => {
+    timings[name] = Date.now() - mark;
+    mark = Date.now();
+  };
+  report.timings = timings;
 
   // Anchor-normalized world, exactly like the rigid pass.
   const aWorld = applyTRS(anchorTriangles, anchor);
@@ -76,9 +102,14 @@ export function buildDrape({ anchorTriangles, placedTriangles, anchor, placed, o
   const norm = 1 / aSize;
   for (let i = 0; i < aWorld.length; i++) aWorld[i] *= norm;
 
+  phase('normalize');
   const field = sdfSampler(buildSDF(aWorld, Number(options.sdfRes ?? DEFAULTS.sdfRes)));
+  phase('sdf');
   const grid = buildTriangleGrid(aWorld, 2 * field.h);
+  phase('triangleGrid');
   const ground = aBounds.min[1] * norm;
+  report.anchorTris = anchorTriangles.length / 9;
+  report.placedTris = placedTriangles.length / 9;
 
   // The lattice lives in the placed file's local frame: surface-rasterized occupancy
   // (no fill, no erosion — a sheet must never vanish), dilated once so every render
@@ -105,8 +136,10 @@ export function buildDrape({ anchorTriangles, placedTriangles, anchor, placed, o
   }
   const start = Float64Array.from(pos);
 
+  phase('lattice');
   const constraints = buildConstraints(lattice, pos);
   report.constraints = constraints.length / 5;
+  phase('constraints');
 
   // Rigid pre-drop to first contact, so the simulation drapes instead of falling.
   const margin = 0.35 * cell * scale * norm;
@@ -119,7 +152,9 @@ export function buildDrape({ anchorTriangles, placedTriangles, anchor, placed, o
     for (let n = 0; n < nodeCount; n++) pos[n * 3 + 1] -= d;
   }
 
+  phase('predrop');
   const outcome = simulate(pos, constraints, field, ground, margin, lattice, norm, report);
+  phase('simulate');
   if (!outcome.ok) {
     report.flags.push('drape_failed');
     return { map: null, report };
@@ -131,21 +166,51 @@ export function buildDrape({ anchorTriangles, placedTriangles, anchor, placed, o
   // fattening; one vertical seal against the actual triangles closes it. The gap is
   // measured on the deformed render vertices themselves — the lattice nodes sit half a
   // cell off the surface by construction.
+  //
+  // Only the single closest vertex sets the drop, so the exact triangle query — a shell
+  // search over the anchor's grid, by far the most expensive call here — is wasted on
+  // every vertex that was never going to win. Naively it ran once per render vertex, and
+  // on a draped garment against a dense anchor that was minutes: the phase measured 150s
+  // and 248s on two real samples against 5.5s and 1.5s for the simulation it follows.
+  //
+  // So the cheap signed field, which approximates true distance to within about a cell,
+  // picks the shortlist, and only those get the exact query. The winner is in there with
+  // enormous margin at 512 candidates.
   const skin = makeSkin(lattice, pos);
+  const band = 6 * field.h;
+  const vertices = Math.floor(placedTriangles.length / 3);
+  // A mesh far denser than the lattice tells the seal nothing extra — neighbouring
+  // vertices share the same lattice cell and skin to nearly the same place.
+  const stride = Math.max(1, Math.ceil(vertices / SEAL_MAX_VERTICES));
+
   let exact = Infinity;
-  for (let i = 0; i < placedTriangles.length; i += 3) {
+  let shortlist = [];
+  const trim = () => {
+    shortlist.sort((a, b) => a[3] - b[3]);
+    if (shortlist.length > SEAL_CANDIDATES) shortlist.length = SEAL_CANDIDATES;
+  };
+  for (let v = 0; v < vertices; v += stride) {
+    const i = v * 3;
     const p = skin(placedTriangles[i], placedTriangles[i + 1], placedTriangles[i + 2]);
     const plane = p[1] - ground;
     if (plane < exact) exact = plane;
-    if (field.at(p[0], p[1], p[2]) < 6 * field.h) {
-      const d = closestSurfaceDistance(grid, p[0], p[1], p[2], 6 * field.h);
-      if (d < exact) exact = d;
+    const sdf = field.at(p[0], p[1], p[2]);
+    if (sdf < band) {
+      shortlist.push([p[0], p[1], p[2], sdf]);
+      if (shortlist.length >= SEAL_CANDIDATES * 4) trim();
     }
+  }
+  trim();
+  report.sealChecked = shortlist.length;
+  for (const [x, y, z] of shortlist) {
+    const d = closestSurfaceDistance(grid, x, y, z, band);
+    if (d < exact) exact = d;
   }
   if (Number.isFinite(exact) && exact > 0) {
     const drop = Math.min(exact + CONTACT_BIAS, 4 * field.h + margin);
     for (let n = 0; n < nodeCount; n++) pos[n * 3 + 1] -= drop;
   }
+  phase('seal');
 
   let moved = 0;
   let lowest = Infinity;
@@ -281,7 +346,13 @@ function simulate(pos, constraints, field, ground, margin, lattice, norm, report
 
   let calm = 0;
   let steps = 0;
+  const deadline = Date.now() + budgetMs();
+  let ranOut = false;
   for (; steps < MAX_SUBSTEPS; steps++) {
+    if (steps % BUDGET_EVERY === 0 && steps > WARMUP && Date.now() > deadline) {
+      ranOut = true;
+      break;
+    }
     prev.set(pos);
     for (let i = 0; i < count; i++) {
       vel[i * 3 + 1] -= GRAVITY * SUBSTEP;
@@ -353,7 +424,7 @@ function simulate(pos, constraints, field, ground, margin, lattice, norm, report
       if (++calm >= SLEEP_STEPS) break;
     } else calm = 0;
   }
-  return { ok: true, steps, flags: [] };
+  return { ok: true, steps, flags: ranOut ? ['drape_budget'] : [] };
 }
 
 /** Cancel this substep's tangential slip at a contact, Coulomb-capped by its depth. */

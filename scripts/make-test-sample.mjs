@@ -12,7 +12,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { serializeGLB } from '../pipeline/glb.mjs';
-import { slug, stems, write } from '../pipeline/metadata.mjs';
+import { slug, stems, write, placementText } from '../pipeline/metadata.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE = path.resolve(ROOT, process.argv[2] ?? '.tmp-local-sample');
@@ -77,7 +77,10 @@ const metadata = {
   uuid,
   created_at: new Date().toISOString(),
   context: 'local physics test',
-  phrasing: 'both',
+  category: 'rigid',
+  complexity: 'simple',
+  relation: 'on top of',
+  detail: 'position',
   placement: 'wooden crate resting on top of the test table, near the back left corner',
   anchor: {
     name: 'test table',
@@ -87,7 +90,7 @@ const metadata = {
   placed: {
     name: 'wooden crate',
     description: 'A small plain wooden cube crate.',
-    textured: true,
+    textured: false,
   },
 };
 
@@ -101,7 +104,7 @@ fs.mkdirSync(dir, { recursive: true });
 fs.writeFileSync(path.join(dir, metadata.anchor.mesh), glbOf(table));
 fs.writeFileSync(path.join(dir, metadata.placed.mesh), glbOf(crate));
 write(dir, metadata);
-fs.writeFileSync(path.join(dir, 'placement.txt'), metadata.placement);
+fs.writeFileSync(path.join(dir, 'placement.txt'), placementText(metadata));
 
 console.log(`sample ${metadata.id}`);
 console.log(`  node pipeline/run.mjs --source=${path.relative(ROOT, SOURCE)} ${metadata.id}`);
